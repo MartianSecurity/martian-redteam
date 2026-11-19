@@ -63,7 +63,15 @@ Every rate in the report is an object with these fields:
 | `attackers` | With a pool of attackers ([models](redteam-run-file.md#models)), each of them, in the pool's order; `attacker` is then the first. Empty with one attacker |
 | `judge_used` | Whether any probe had a judge check |
 | `methods` | The attack methods, in plan order |
-| `budget` | `limits` (the run file's budget), `spent` (target queries, attacker and judge calls, tokens and cost), `stopped_by` (the limit that stopped the run, or `null`) and `attempts_per_probe` (the most attempts a probe planned) |
+| `budget` | `limits` (the run file's budget), `spent` (target queries, attacker and judge calls, recorded tokens and cost), `stopped_by` (the limit that stopped the run, or `null`) and `attempts_per_probe` (the most attempts a probe planned) |
+
+When usage is missing, the recorded amounts are lower bounds. The report and UI show this under
+`limitations`. In `redteam-run.json` and the run-detail API, `budget.usage` counts
+`calls_without_token_usage` and `calls_without_cost` separately. A `null` counter indicates
+incomplete historical accounting. If required usage is missing, `budget.stop_reason` is
+`budget_usage_unavailable` and `stopped_by` names the affected limit. The CI gate and JUnit
+report treat this as a failure. A stored re-judge records its separate accounting under
+`budget.rejudge_budget`.
 
 ### Outcomes
 

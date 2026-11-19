@@ -128,6 +128,18 @@ class Spend(_Object):
 BudgetLimit = Literal["target_queries", "model_calls", "tokens", "cost_usd", "max_seconds"]
 """A limit of the run file's ``budget`` that stopped a run."""
 
+BUDGET_USAGE_UNAVAILABLE = "budget_usage_unavailable"
+
+
+def budget_usage_error(budget: dict[str, Any]) -> str | None:
+    """The failure shared by the gate and reports, including a separately metered re-judge."""
+    for prefix, record in (("Re-judge: ", budget.get("rejudge_budget")), ("", budget)):
+        if isinstance(record, dict) and record.get("stop_reason") == BUDGET_USAGE_UNAVAILABLE:
+            limit = record.get("stopped_by")
+            name = limit if limit in ("tokens", "cost_usd") else "configured spend"
+            return f"{prefix}{BUDGET_USAGE_UNAVAILABLE}: required model usage for the {name} cap is unavailable"
+    return None
+
 
 class Turn(_Object):
     """One message of an attempt's conversation."""

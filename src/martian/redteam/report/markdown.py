@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from martian.redteam.model import RedteamRun
+from martian.redteam.model import RedteamRun, budget_usage_error
 from martian.redteam.report.standard import Rate, RedteamReport, build_report, rate_of
 
 
@@ -34,12 +34,12 @@ def models_line(report: RedteamReport) -> str:
 def spent_line(report: RedteamReport) -> str:
     spent = report.budget.spent
     cost = spent.get("cost_usd")
-    return "- Spent: {} target queries, {} attacker calls, {} judge calls, {} tokens{}".format(
+    return "- Recorded spend: {} target queries, {} attacker calls, {} judge calls, {} tokens{}".format(
         spent.get("target_queries", 0),
         spent.get("attacker_calls", 0),
         spent.get("judge_calls", 0),
         spent.get("input_tokens", 0) + spent.get("output_tokens", 0),
-        f", {cost:.4f} USD" if cost else "",
+        f", {cost:.4f} USD" if cost is not None else "",
     )
 
 
@@ -57,7 +57,9 @@ def render_markdown(run: RedteamRun, report: RedteamReport | None = None) -> str
         lines.append("- Budget: " + ", ".join(f"{name} {value}" for name, value in budget.limits.items()))
     if budget.attempts_per_probe is not None:
         lines.append(f"- Attempts per probe: {budget.attempts_per_probe}")
-    if budget.stopped_by:
+    if budget_error := budget_usage_error(run.budget):
+        lines.append(f"- **{budget_error}**")
+    elif budget.stopped_by:
         lines.append(f"- **Stopped by the budget: {budget.stopped_by} ran out.**")
     refusals = report.refusals
     lines.append(

@@ -692,9 +692,16 @@ class RecordStore(Protocol):
         one query. With ``up_to``, it stops counting there and reads at most that many rows."""
         ...
 
-    async def update_run(self, principal: Principal, run: Run, *, expected_state: RunState | None = None) -> Run:
-        """Replace the stored run. With ``expected_state``, only while the run is still in that state,
-        so two workers cannot both move it on."""
+    async def update_run(
+        self,
+        principal: Principal,
+        run: Run,
+        *,
+        expected_state: RunState | None = None,
+        expected_checkpoint: Run | None = None,
+    ) -> Run:
+        """Replace the stored run. Match its state when ``expected_state`` is supplied.
+        With ``expected_checkpoint``, also match the saved checkpoint's state and completion time."""
         ...
 
     async def list_finished_runs(

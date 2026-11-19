@@ -103,12 +103,18 @@ async def rejudge(
         for item in again.evidence_ids:
             if item in evidence:
                 engine.evidence[item] = evidence[item]
-    run = engine.snapshot(stored.state if stored.state != "running" else "completed")
+    state = stored.state if stored.state != "running" else "completed"
+    run = engine.snapshot("stopped" if engine.ledger.stopped_by is not None else state)
+    rejudge_budget = engine.ledger.summary()
     return run.model_copy(
         update={
             "started_at": stored.started_at,
-            "budget": {**stored.budget, "rejudge": engine.ledger.summary()["spent"]},
-            "limitations": stored.limitations,
+            "budget": {
+                **stored.budget,
+                "rejudge": rejudge_budget["spent"],
+                "rejudge_budget": rejudge_budget,
+            },
+            "limitations": [*stored.limitations, *(f"Re-judge: {note}" for note in engine.ledger.limitations())],
             "provenance": {
                 **run.provenance,
                 "rejudged_from": stored.id,

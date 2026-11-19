@@ -308,6 +308,7 @@ def _run_version_2(
     """Run a version 2 file with the red team engine, write its reports, keep it and apply its gate."""
     from contextlib import AsyncExitStack
 
+    from martian.redteam.engine.budget import BudgetExhausted, Ledger, ResumeError
     from martian.redteam.engine.memory import StrategyLibraryError
     from martian.redteam.engine.plan import PlanError, plan
     from martian.redteam.engine.report import for_report, write_reports
@@ -369,21 +370,21 @@ def _run_version_2(
         except ImportError:
             console.print("Not kept in the local store: install martian-sdk[evals] for that.")
     earlier = None
-    if resume is not None:
-        if keeper is None:
-            _stop("--resume reads the run from the local store: drop --no-store, and install martian-sdk[evals].")
-        earlier = asyncio.run(keeper.get("default", resume))
-        if earlier is None:
-            keeper.close()
-            _stop(f"No red team run {resume} is in the local store.")
-
-    canary = run_canary(earlier)
-    run_id = earlier.id if earlier is not None else f"redteam-{uuid4().hex[:12]}"
+    if resume is not None and keeper is None:
+        _stop("--resume reads the run from the local store: drop --no-store, and install martian-sdk[evals].")
+    run_id = resume if resume is not None else f"redteam-{uuid4().hex[:12]}"
     admitted: Any = None
 
     async def go() -> Any:
-        nonlocal admitted
+        nonlocal admitted, earlier
         async with AsyncExitStack() as stack:
+            exclusive = stack.enter_context(keeper.run_session("default", run_id)) if keeper is not None else False
+            if resume is not None:
+                earlier = await keeper.get("default", run_id)
+                if earlier is None:
+                    _stop(f"No red team run {resume} is in the local store.")
+                Ledger(run_file.budget).restore(earlier)
+            canary = run_canary(earlier)
             service, provenance = build_service(run_file, stack)
             planted = planted_run_file(run_file, canary)
             target = build_target(planted.target, base=config_path.resolve().parent)
@@ -411,6 +412,7 @@ def _run_version_2(
                 provenance=provenance,
                 store=keeper,
                 resume=earlier,
+                recover_interrupted=exclusive,
                 canary=canary,
                 run_id=run_id,
                 world=admitted.world() if admitted is not None else None,
@@ -422,6 +424,8 @@ def _run_version_2(
     try:
         run, service = asyncio.run(go())
     except (
+        BudgetExhausted,
+        ResumeError,
         ServiceSelectionError,
         TargetUnavailable,
         ConfigError,
@@ -472,6 +476,8 @@ def _run_version_2(
 
 
 def _print_run(run: Any) -> None:
+    from martian.redteam.model import budget_usage_error
+
     counts = run.counts
     table = Table(title=f"Martian red team run {run.id}")
     for column in ("Attempts", "Vulnerable", "Held", "Undetermined", "Stopped", "Errors", "Confirmed", "Suspected"):
@@ -497,7 +503,9 @@ def _print_run(run: Any) -> None:
             f"Attacker refused or left empty {counts.refusals} of {counts.generations} generations "
             f"({counts.refusals / counts.generations:.0%})."
         )
-    if run.budget.get("stopped_by"):
+    if budget_error := budget_usage_error(run.budget):
+        console.print(budget_error, markup=False)
+    elif run.budget.get("stopped_by"):
         console.print(f"Stopped by the budget: {run.budget['stopped_by']} ran out.")
 
 

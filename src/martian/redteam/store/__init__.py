@@ -17,6 +17,11 @@ record store. Needs the ``evals`` extra.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import sqlite3
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,8 +29,11 @@ from typing import Any
 from martian.evals.model import CaseResult, CaseStatus, Page, Run, Score
 from martian.evals.model import Counts as EvalCounts
 from martian.evals.records import RecordStore, RedteamRecords
+from martian.evals.records.events import space_of
 from martian.evals.server.principal import SINGLE_USER, Principal
 from martian.evals.server.projection import DEFAULT_PROJECT
+from martian.evals.store import StoreError
+from martian.redteam.engine.budget import ResumeError
 from martian.redteam.model import (
     Attempt,
     AttemptOutcome,
@@ -174,6 +182,30 @@ class RedteamStore:
         if close is not None:
             close()
 
+    @contextmanager
+    def run_session(self, project_id: str, run_id: str, *, principal: Principal = SINGLE_USER) -> Iterator[bool]:
+        """Hold a local run's exclusive session until the command or background task exits.
+
+        SQLite's transaction lock also releases on process exit. Each run has its own lock
+        database so other runs and report readers can use the record database during execution.
+        """
+        database = getattr(self.records, "local_database_path", None)
+        if database is None:
+            yield False
+            return
+        folder = database.parent / f".{database.name}-redteam-sessions"
+        folder.mkdir(mode=0o700, exist_ok=True)
+        identity = json.dumps((space_of(principal), project_id, run_id)).encode("utf-8")
+        path = folder / hashlib.sha256(identity).hexdigest()
+        with closing(sqlite3.connect(path, timeout=0)) as lock:
+            try:
+                lock.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as error:
+                if error.sqlite_errorcode != sqlite3.SQLITE_BUSY:
+                    raise
+                raise ResumeError("This red team run already has an active session") from None
+            yield True
+
     async def save(self, run: RedteamRun, *, principal: Principal = SINGLE_USER) -> RedteamRun:
         """Record the run, replacing an earlier record of the same id: its run, its attempts as case
         results with their checks as scores, and its probes, evidence, verifications and findings."""
@@ -183,8 +215,6 @@ class RedteamStore:
             await self.records.create_run(principal, record)
         else:
             if existing.kind != "redteam":
-                from martian.evals.store import StoreError
-
                 raise StoreError("conflict", "an eval run already has this id")
             await self.records.update_run(principal, record.model_copy(update={"created_at": existing.created_at}))
         results = [as_case_result(run.id, position, attempt) for position, attempt in enumerate(run.attempts)]
@@ -207,6 +237,32 @@ class RedteamStore:
             ),
         )
         return run
+
+    async def claim_resume(
+        self, earlier: RedteamRun, *, principal: Principal = SINGLE_USER, recover_interrupted: bool = False
+    ) -> None:
+        """Durably mark the verified checkpoint as running before any resumed model work."""
+        if earlier.state == "running" and not recover_interrupted:
+            raise ResumeError("A running checkpoint needs an exclusive local session before it can resume.")
+        conflict = "The saved run changed before it could resume. Read its current state and try again."
+        saved = await self.records.get_run(principal, earlier.project_id, earlier.id)
+        if (
+            saved is None
+            or saved.kind != "redteam"
+            or saved.state != earlier.state
+            or saved.finished_at != earlier.finished_at
+        ):
+            raise ResumeError(conflict)
+        try:
+            await self.records.update_run(
+                principal,
+                saved.model_copy(update={"state": "running", "finished_at": None}),
+                expected_checkpoint=saved,
+            )
+        except StoreError as error:
+            if error.kind not in {"conflict", "not_found"}:
+                raise
+            raise ResumeError(conflict) from None
 
     async def get(self, project_id: str, run_id: str, *, principal: Principal = SINGLE_USER) -> RedteamRun | None:
         """The red team run, rebuilt from its records; ``None`` when there is none of this id."""

@@ -69,8 +69,8 @@ async def test_a_killed_run_resumes_and_makes_no_model_call_for_finished_attempt
     rerun = PLANNED - len(finished)
     assert (len(service.simulated), len(target.calls), len(service.evaluated)) == (rerun, rerun, rerun)
     assert {attempt.id for attempt in finished}.isdisjoint(session for _, session in target.calls)
-    # What the earlier session spent still counts against the run's budget.
-    assert resumed.budget["spent"]["target_queries"] == PLANNED
+    # A query already recorded for an interrupted attempt still counts when that attempt runs again.
+    assert resumed.budget["spent"]["target_queries"] == earlier.budget["spent"]["target_queries"] + rerun
     assert resumed.provenance["resumed_attempts"] == len(finished)
     kept = await store.get("default", "run-1")
     assert kept is not None and kept.state == "completed" and kept.counts.attempts == PLANNED

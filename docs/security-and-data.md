@@ -378,9 +378,10 @@ four times, with a five-second timeout each, so an installation with no route to
 it before its first verdict, and one that audits its outbound traffic sees the attempts. A judge
 asks for a price only when `MLFLOW_MODEL_CATALOG_URI` names a catalogue (`martian.evals._judge_transport`),
 which MLflow reads: a mirror (`https://`) or a folder (`file://`) with the catalogue's
-`<provider>.json` files under it. With the variable unset or empty, the default, a judged call makes
-no download and its metadata leaves out `mlflow.assessment.judgeCost`, the price of the call.
-Nothing in the core reads that price, and the tokens, the model version and every verdict are
+`<provider>.json` files under it. The configured catalogue must explicitly price input and output
+tokens. Zero is a valid rate. With the variable unset or empty, the default, a judged call makes
+no download. If either rate is unavailable, the metadata leaves out
+`mlflow.assessment.judgeCost`, the price of the call. The tokens, model version and verdict are
 recorded as before.
 
 The same variable also decides where MLflow prices the model calls of a traced target (the

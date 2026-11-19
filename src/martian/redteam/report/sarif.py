@@ -13,7 +13,7 @@ import hashlib
 from typing import Any
 
 from martian._version import __version__
-from martian.redteam.model import RedteamRun
+from martian.redteam.model import RedteamRun, budget_usage_error
 from martian.redteam.report.standard import FindingRow, RedteamReport, build_report
 
 SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
@@ -101,14 +101,16 @@ def render_sarif(
             ]
         results.append(result)
     spent = report.budget.spent
+    budget_error = budget_usage_error(run.budget)
     invocation = {
-        "executionSuccessful": run.state in ("completed", "stopped"),
+        "executionSuccessful": run.state in ("completed", "stopped") and budget_error is None,
         "properties": {
             "state": run.state,
             "stopped_by": report.budget.stopped_by,
             "target_queries": spent.get("target_queries", 0),
             "attacker": report.attacker.model if report.attacker else None,
             "judge": report.judge.model if report.judge else None,
+            **({"budget_error": budget_error} if budget_error is not None else {}),
         },
     }
     return {

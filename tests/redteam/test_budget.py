@@ -1,0 +1,423 @@
+"""Model-call accounting fixtures. None of these opens a target or model connection."""
+
+import asyncio
+import json
+import xml.etree.ElementTree as ET
+from contextlib import AsyncExitStack
+from datetime import UTC, datetime
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
+from pydantic import BaseModel
+
+from martian.evals import _judge_transport
+from martian.evals.server.principal import SINGLE_USER
+from martian.evals.store import StoreError
+from martian.redteam.engine.budget import BudgetExhausted, Ledger, ResumeError
+from martian.redteam.engine.launcher import LocalLauncher
+from martian.redteam.engine.local import LocalService, UnreadableJudgment
+from martian.redteam.engine.run import _Spending
+from martian.redteam.engine.runs import build_service, execute
+from martian.redteam.engine.service import ServiceSelectionError
+from martian.redteam.gate import evaluate
+from martian.redteam.model import BUDGET_USAGE_UNAVAILABLE, Attempt, Check, Evidence, Probe, RedteamRun, Spend
+from martian.redteam.report.html import render_html
+from martian.redteam.report.junit import render_junit
+from martian.redteam.report.markdown import render_markdown
+from martian.redteam.report.sarif import render_sarif
+from martian.redteam.runfile import Budget, Gate, ModelConfig, Models, RunFile
+from martian.redteam.store import RedteamStore
+from martian.redteam.verify.judge import EngineJudge, judge_for
+from martian.redteam.verify.verifiers import Observation, meter_model_call
+from martian_redteam.types import ModelUsage
+
+PROBE = Probe(
+    id="fixture",
+    vulnerability="fixture",
+    vulnerability_type="fixture",
+    attack_method="fixture",
+    objective_class="disclosure",
+)
+
+
+@pytest.mark.parametrize(("first_cost", "sent"), [(0.006, [0, 1]), (None, [0])])
+async def test_spend_cap_settles_each_model_call_before_the_next_is_admitted(first_cost, sent):
+    ledger = Ledger(Budget(cost_usd=0.01, model_calls=3))
+    calls = []
+
+    async def call(index):
+        meter = _Spending(ledger, f"fixture-{index}")
+        try:
+            async with meter_model_call(meter, "judge") as reported:
+                calls.append(index)
+                await asyncio.sleep(0)  # All other callers try to reserve while this one is in flight.
+                reported(ModelUsage(cost_usd=first_cost if index == 0 else 0.006))
+        except BudgetExhausted as exc:
+            assert exc.limit == "cost_usd"
+
+    await asyncio.gather(*(call(index) for index in range(3)))
+
+    assert calls == sent
+    assert ledger.spent.model_calls == len(sent)
+    assert ledger.spent.cost_usd == pytest.approx(0.012 if first_cost is not None else 0)
+    assert ledger.stop_reason == (BUDGET_USAGE_UNAVAILABLE if first_cost is None else None)
+
+
+def test_only_required_usage_can_stop_a_run_and_explicit_zero_is_a_measurement():
+    dollars = Ledger(Budget(cost_usd=0.01))
+    dollars.reserve("judge", PROBE.id)
+    dollars.record(PROBE.id, ModelUsage(cost_usd=0))
+    assert dollars.usage == {"calls_without_token_usage": 1, "calls_without_cost": 0}
+    assert dollars.stopped_by is None
+
+    tokens = Ledger(Budget(tokens=10))
+    tokens.reserve("judge", PROBE.id)
+    tokens.record(PROBE.id, ModelUsage(input_tokens=0, output_tokens=0))
+    assert tokens.stopped_by is None
+    tokens.reserve("judge", PROBE.id)
+    tokens.record(PROBE.id, ModelUsage(input_tokens=4))
+    assert tokens.spent.tokens == 4
+    assert tokens.usage == {"calls_without_token_usage": 1, "calls_without_cost": 2}
+    assert tokens.stopped_by == "tokens"
+    with pytest.raises(BudgetExhausted, match=BUDGET_USAGE_UNAVAILABLE):
+        tokens.reserve("judge", PROBE.id)
+
+
+async def test_local_model_setup_requires_pricing_for_dollar_caps_and_disables_sdk_retries(monkeypatch):
+    model = ModelConfig(model="openai:/fixture")
+    run_file = RunFile.model_construct(version=2, attacks=[], models=Models(attacker=model, judge=model))
+    monkeypatch.delenv("MLFLOW_MODEL_CATALOG_URI", raising=False)
+    async with AsyncExitStack() as stack:
+        ordinary, _ = build_service(run_file, stack, {})
+        assert isinstance(ordinary, LocalService)
+        assert ordinary.max_retries > 0
+
+        capped = run_file.model_copy(update={"budget": Budget(cost_usd=0.01)})
+        with pytest.raises(ServiceSelectionError, match="MLFLOW_MODEL_CATALOG_URI"):
+            build_service(capped, stack, {})
+
+        monkeypatch.setenv("MLFLOW_MODEL_CATALOG_URI", "file:///unused-fixture-prices")
+        service, _ = build_service(capped, stack, {})
+        assert isinstance(service, LocalService)
+        judge = judge_for(capped, service)
+        assert service.max_retries == service.rate_limit_wait_seconds == 0
+        assert judge.max_retries == judge.rate_limit_wait_seconds == 0
+
+
+async def test_interrupted_provider_call_is_settled_as_unknown():
+    ledger = Ledger(Budget(cost_usd=0.01))
+    started = asyncio.Event()
+    meter = _Spending(ledger, PROBE.id)
+
+    async def call():
+        async with meter_model_call(meter, "judge"):
+            started.set()
+            await asyncio.Future()
+
+    running = asyncio.create_task(call())
+    await asyncio.wait_for(started.wait(), timeout=2)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    assert ledger.usage == {"calls_without_token_usage": 1, "calls_without_cost": 1}
+    assert meter.spend.judge_calls == 1
+    with pytest.raises(BudgetExhausted, match=BUDGET_USAGE_UNAVAILABLE):
+        async with meter_model_call(_Spending(ledger, PROBE.id), "judge"):
+            pytest.fail("the second call was admitted")
+
+
+@pytest.mark.parametrize(
+    ("adapter", "invalid_citation"), [("local-service", False), ("rubric-verifier", False), ("rubric-verifier", True)]
+)
+async def test_unreadable_replies_keep_reported_usage(monkeypatch, adapter, invalid_citation):
+    class Shipment(BaseModel):
+        status: str
+
+    content = '{"status":'
+    if invalid_citation:
+        content = json.dumps(
+            {"result": [{"rubric_index": 1, "reason": "States the status.", "verdict": "pass", "evidence_ids": [2]}]}
+        )
+    completion = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=content, tool_calls=None),
+                finish_reason="stop" if invalid_citation else "length",
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-key")
+    monkeypatch.setattr(_judge_transport, "_gateway_completion", lambda *_: (completion, True))
+    monkeypatch.setattr(_judge_transport, "_price", lambda *_: 0.005)
+    ledger = Ledger(Budget(tokens=20, cost_usd=0.01))
+    meter = _Spending(ledger, PROBE.id)
+    model = ModelConfig(model="openai:/fixture")
+
+    if adapter == "local-service":
+        with pytest.raises(UnreadableJudgment, match="judge_invalid_schema"):
+            async with meter_model_call(meter, "judge"):
+                await LocalService(spend_capped=True)._call("judge", model, "Shipment status", "In transit", Shipment)
+    else:
+        check = Check(id="status", kind="judge", spec={"criteria": "States the shipment status."})
+        seen = Observation(attempt_id="fixture", probe=PROBE, attack="Where is my shipment?", reply="In transit.")
+        result = await EngineJudge(model, spend_capped=True).verify(check, seen, meter)
+        error = "judge_unreadable" if invalid_citation else "judge_invalid_schema"
+        assert result.hit is None and error in (result.error or "")
+
+    assert ledger.spent == Spend(judge_calls=1, input_tokens=10, output_tokens=5, cost_usd=0.005)
+    assert ledger.usage == {"calls_without_token_usage": 0, "calls_without_cost": 0}
+    ledger.check()
+
+
+async def test_a_blank_reply_takes_no_model_reservation(monkeypatch):
+    judge = EngineJudge(ModelConfig(model="openai:/fixture"), spend_capped=True)
+
+    def unexpected_scorer():
+        pytest.fail("the blank reply reached model setup")
+
+    monkeypatch.setattr(judge, "_judge", unexpected_scorer)
+    ledger = Ledger(Budget(tokens=20))
+    check = Check(id="status", kind="judge", spec={"criteria": "States the shipment status."})
+    seen = Observation(attempt_id="fixture", probe=PROBE, attack="Where is my shipment?", reply=" \t")
+    result = await judge.verify(check, seen, _Spending(ledger, PROBE.id))
+    assert result.hit is None and "judge_unreadable" in (result.error or "")
+    assert ledger.spent.model_calls == 0
+    ledger.check()
+
+
+def test_resume_uses_cumulative_spend_even_when_failed_attempts_are_retried():
+    ledger = Ledger(Budget(cost_usd=0.01))
+    ledger.reserve("judge", PROBE.id)
+    ledger.record(PROBE.id, ModelUsage(input_tokens=3, output_tokens=2, cost_usd=0.006))
+    ledger.reserve("judge", PROBE.id)
+    ledger.record(PROBE.id, ModelUsage(input_tokens=4, output_tokens=1, cost_usd=0.006))
+    earlier = RedteamRun(
+        id="fixture-resume",
+        catalog_version="fixture",
+        state="failed",
+        probes=[PROBE],
+        attempts=[
+            Attempt(
+                id="fixture#1",
+                probe_id=PROBE.id,
+                number=1,
+                outcome="error",
+                error="fixture",
+                spend=Spend(judge_calls=1, cost_usd=0.006),
+            )
+        ],
+        budget=ledger.summary(),
+    )
+    resumed = Ledger(Budget(cost_usd=0.01))
+    resumed.restore(RedteamRun.model_validate_json(earlier.model_dump_json()))
+    assert resumed.spent == ledger.spent
+    assert resumed.by_probe == ledger.by_probe
+    with pytest.raises(BudgetExhausted, match="cost_usd ran out"):
+        resumed.reserve("judge", PROBE.id)
+
+
+@pytest.mark.parametrize("history", ["legacy", "running", "orphan-cancelled"])
+def test_spend_capped_resume_cannot_certify_incomplete_history(history):
+    ledger = Ledger(Budget())
+    ledger.reserve("judge", PROBE.id)
+    ledger.record(PROBE.id, ModelUsage(input_tokens=0, output_tokens=0, cost_usd=0))
+    budget = ledger.summary()
+    if history == "legacy":
+        del budget["usage"]
+    elif history == "orphan-cancelled":
+        budget["history_incomplete"] = True
+    earlier = RedteamRun(
+        id="fixture-legacy",
+        catalog_version="fixture",
+        state="running" if history == "running" else "cancelled",
+        budget=budget,
+    )
+    resumed = Ledger(Budget(cost_usd=0.01))
+    with pytest.raises(BudgetExhausted, match=BUDGET_USAGE_UNAVAILABLE):
+        resumed.restore(earlier)
+    assert resumed.spent.model_calls == 1
+    assert resumed.usage["calls_without_cost"] is None
+
+
+@pytest.mark.parametrize("reason", [BUDGET_USAGE_UNAVAILABLE, "original run ID"])
+async def test_refused_resume_preserves_the_stored_attempt_and_evidence(monkeypatch, tmp_path, reason):
+    ledger = Ledger(Budget(cost_usd=0.01))
+    ledger.reserve("judge", PROBE.id)
+    rejudged = reason == "original run ID"
+    # The original execution's spend can be complete while a rejudge has a separate ledger.
+    ledger.record(PROBE.id, ModelUsage(input_tokens=10, output_tokens=5, cost_usd=0.005) if rejudged else None)
+    run_file = {
+        "version": 2,
+        "target": {"purpose": "Shipment status", "file": str(tmp_path / "absent.py"), "function": "respond"},
+        "vulnerabilities": [{"name": "custom", "id": "fixture", "criteria": "States shipment status."}],
+        "attacks": [{"name": "Templates"}],
+        "budget": {"cost_usd": 0.01},
+    }
+    provenance = {"launch": {"run_file": run_file}}
+    budget = ledger.summary()
+    if rejudged:
+        provenance["rejudged_from"] = "fixture-original"
+        rejudge = Ledger(ledger.budget)
+        rejudge.reserve("judge", PROBE.id)
+        rejudge.record(PROBE.id, None)
+        budget["rejudge_budget"] = rejudge.summary()
+    failed = Attempt(
+        id="fixture#1",
+        number=1,
+        probe_id=PROBE.id,
+        outcome="error",
+        error="fixture",
+        evidence_ids=["ev-1"],
+        spend=Spend(judge_calls=1),
+    )
+    earlier = RedteamRun(
+        id="fixture-resume",
+        catalog_version="fixture",
+        state="failed",
+        probes=[PROBE],
+        attempts=[failed],
+        evidence=[Evidence(id="ev-1", kind="trace", content="Recorded fixture evidence")],
+        budget=budget,
+        provenance=provenance,
+    )
+    store = RedteamStore.local(tmp_path)
+    try:
+        await store.save(earlier)
+        before = await store.get(earlier.project_id, earlier.id)
+        assert before is not None and before.attempts[0].evidence_ids == [before.evidence[0].id]
+        launcher = LocalLauncher(store.records, environ={})
+
+        def unexpected_setup(*args, **kwargs):
+            pytest.fail("the refused resume began model setup")
+
+        monkeypatch.setattr("martian.redteam.engine.launcher.build_service", unexpected_setup)
+        with pytest.raises(HTTPException, match=reason) as refused:
+            await launcher.resume(SINGLE_USER, earlier.project_id, earlier.id)
+        assert refused.value.status_code == 409
+        assert await store.get(earlier.project_id, earlier.id) == before
+        assert not launcher.tasks
+    finally:
+        store.close()
+
+
+async def test_a_resume_has_one_durable_claim_before_the_engine_runs(monkeypatch, tmp_path):
+    ledger = Ledger(Budget(tokens=20))
+    ledger.reserve("judge", PROBE.id)
+    ledger.record(PROBE.id, ModelUsage(input_tokens=10, output_tokens=5))
+    earlier = RedteamRun(
+        id="fixture-claim",
+        catalog_version="fixture",
+        state="failed",
+        finished_at=datetime.now(UTC),
+        budget=ledger.summary(),
+    )
+    first, second = RedteamStore.local(tmp_path), RedteamStore.local(tmp_path)
+    try:
+        await first.save(earlier)
+        old = await first.records.get_run(SINGLE_USER, earlier.project_id, earlier.id)
+        assert old is not None
+        concurrent = asyncio.Barrier(2)
+        dispatched = []
+
+        class PassiveEngine:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            async def run(self):
+                active = await first.get(earlier.project_id, earlier.id)
+                assert active is not None and active.state == "running" and active.budget == earlier.budget
+                dispatched.append(active)
+                return active
+
+        def coordinate(update):
+            async def claim(*args, **kwargs):
+                await concurrent.wait()
+                return await update(*args, **kwargs)
+
+            return claim
+
+        run_file = RunFile.model_construct(version=2, attacks=[], budget=ledger.budget)
+        with monkeypatch.context() as patch:
+            patch.setattr("martian.redteam.engine.runs.Engine", PassiveEngine)
+            for store in (first, second):
+                patch.setattr(store.records, "update_run", coordinate(store.records.update_run))
+            outcomes = await asyncio.wait_for(
+                asyncio.gather(
+                    *(
+                        execute(run_file, service=LocalService(), target=object(), store=store, resume=earlier)
+                        for store in (first, second)
+                    ),
+                    return_exceptions=True,
+                ),
+                timeout=5,
+            )
+
+        assert len(dispatched) == 1 and dispatched[0] in outcomes
+        assert sum(isinstance(outcome, ResumeError) for outcome in outcomes) == 1
+        # No terminal checkpoint was saved, as when a process is killed.
+        with pytest.raises(BudgetExhausted, match=BUDGET_USAGE_UNAVAILABLE):
+            Ledger(ledger.budget).restore(dispatched[0])
+
+        ended = earlier.model_copy(update={"finished_at": datetime.now(UTC)})
+        await first.save(ended)
+        with pytest.raises(StoreError, match="expected state"):
+            await second.records.update_run(
+                SINGLE_USER, old.model_copy(update={"state": "running"}), expected_checkpoint=old
+            )
+    finally:
+        first.close()
+        second.close()
+
+
+async def test_a_running_checkpoint_can_only_be_recovered_with_the_local_session(tmp_path):
+    first, second = RedteamStore.local(tmp_path), RedteamStore.local(tmp_path)
+    try:
+        running = RedteamRun(id="fixture-running", catalog_version="fixture", state="running")
+        await first.save(running)
+        with pytest.raises(ResumeError, match="exclusive local session"):
+            await second.claim_resume(running)
+
+        with first.run_session(running.project_id, running.id):
+            launcher = LocalLauncher(second.records)
+            with pytest.raises(HTTPException, match="active session") as refused:
+                await launcher.resume(SINGLE_USER, running.project_id, running.id)
+            assert refused.value.status_code == 409
+            with second.run_session(running.project_id, "independent-run") as independent:
+                assert independent
+
+        with second.run_session(running.project_id, running.id) as recovery:
+            assert recovery
+            await second.claim_resume(running, recover_interrupted=recovery)
+        assert await first.get(running.project_id, running.id) == running
+    finally:
+        first.close()
+        second.close()
+
+
+def test_unverifiable_budget_fails_the_gate_and_ci_reports_even_with_a_decided_attempt():
+    ledger = Ledger(Budget(cost_usd=0.01))
+    ledger.reserve("judge", PROBE.id)
+    ledger.record(PROBE.id, ModelUsage(input_tokens=0, output_tokens=0))
+    run = RedteamRun(
+        id="fixture-report",
+        catalog_version="fixture",
+        state="stopped",
+        probes=[PROBE],
+        attempts=[Attempt(id="fixture#1", probe_id=PROBE.id, number=1, outcome="resisted")],
+        budget=ledger.summary(),
+        limitations=ledger.limitations(),
+    )
+    gate = evaluate(run, Gate(undetermined="ignore"))
+    assert gate.exit_code == 1
+    assert len(gate.failures) == 1 and BUDGET_USAGE_UNAVAILABLE in gate.failures[0]
+    assert "Recorded spend" in render_markdown(run)
+    assert BUDGET_USAGE_UNAVAILABLE in render_html(run)
+    junit = ET.fromstring(render_junit(run))
+    assert junit.find(f".//error[@type='{BUDGET_USAGE_UNAVAILABLE}']") is not None
+    assert junit.attrib["errors"] == "1"
+    invocation = render_sarif(run)["runs"][0]["invocations"][0]
+    assert invocation["executionSuccessful"] is False
+    assert BUDGET_USAGE_UNAVAILABLE in invocation["properties"]["budget_error"]

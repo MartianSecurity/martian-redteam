@@ -39,6 +39,7 @@ import random
 import secrets
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -90,7 +91,7 @@ from martian.redteam.verify.canary import plant as plant_canary
 from martian.redteam.verify.judge import calibrate, failure_code, failure_kind, judge_for, read_sample
 from martian.redteam.verify.listener import ReceiptListener
 from martian.redteam.verify.rules import RULES_VERSION, Repetition, attempt_outcome, verify
-from martian.redteam.verify.verifiers import Decided, Observation, VerifierFailed, Verifiers, decide
+from martian.redteam.verify.verifiers import Decided, Observation, VerifierFailed, Verifiers, decide, meter_model_call
 from martian_redteam.catalog.entries import EARLIER_USER_NOTE, POISON_NOTE
 from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION
 from martian_redteam.client import ClientError
@@ -213,6 +214,9 @@ class _Spending:
     def record(self, usage: ModelUsage | None) -> None:
         self.spend = self.spend + self.ledger.record(self.probe_id, usage)
 
+    def model_slot(self) -> AbstractAsyncContextManager[None]:
+        return self.ledger.model_slot()
+
 
 class Engine:
     """Runs one version 2 run file against ``target`` with ``service``."""
@@ -319,6 +323,7 @@ class Engine:
         """Take over ``earlier``'s id and start, and keep each finished attempt whose fingerprint is
         unchanged. An attempt that errored or was stopped runs again."""
         self.run_id, self.project_id, self.started_at = earlier.id, earlier.project_id, earlier.started_at
+        self.ledger.restore(earlier)
         kept = earlier.provenance.get("judge_calibration")
         self.calibration = kept if isinstance(kept, dict) and "error" not in kept else None
         before = {attempt.id: attempt for attempt in earlier.attempts}
@@ -334,7 +339,6 @@ class Engine:
                     continue
                 self.attempts[found.id] = found
                 self.reused.add(found.id)
-                self.ledger.credit(planned.probe.id, found.spend or Spend())
                 for item in found.evidence_ids:
                     if item in evidence:
                         self.evidence[item] = evidence[item]
@@ -1188,20 +1192,20 @@ class Engine:
             asked = (request, f"{request}\n\n{DEFENSIVE_FRAMING}")
         # A refusal or an empty generation is asked once more, with the defensive framing.
         for prompt in asked:
-            spending.reserve("attacker")
             try:
-                service = spending.service or self.service
-                if source is not None:
-                    # Only the hosted client takes a source; the run file allows it with no other.
-                    output = await service.simulate(context, prompt=prompt, source=source)  # type: ignore[call-arg]
-                else:
-                    output = await service.simulate(context, prompt=prompt)
+                async with meter_model_call(spending, "attacker") as reported:
+                    service = spending.service or self.service
+                    if source is not None:
+                        # Only the hosted client takes a source; the run file allows it with no other.
+                        output = await service.simulate(context, prompt=prompt, source=source)  # type: ignore[call-arg]
+                    else:
+                        output = await service.simulate(context, prompt=prompt)
+                    reported(output.usage)
             except EmptyGeneration:
                 found = "empty"
             except ClientError as error:
                 raise AttemptFailed(failure_kind(error), failure_code(error, "attacker_failed"), str(error)) from None
             else:
-                spending.record(output.usage)
                 found = classify(output.attack)
                 if found is None:
                     return output.attack, {"policy_revision": output.policy_revision}
@@ -1491,7 +1495,7 @@ class Engine:
         }
 
     def _limitations(self) -> list[str]:
-        found = []
+        found = self.ledger.limitations()
         if not self.run_file.verification.repetitions:
             found.append("No repetitions ran, so no finding is verified.")
         if not self.run_file.verification.control:

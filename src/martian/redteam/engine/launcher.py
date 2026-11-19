@@ -26,16 +26,18 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Mapping
-from contextlib import AsyncExitStack
+from collections.abc import Iterator, Mapping
+from contextlib import AsyncExitStack, ExitStack, contextmanager
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from fastapi import HTTPException
 
 from martian.config import ConfigError
 from martian.evals.local_targets import KEY_REFERENCE, LocalTargets
 from martian.evals.server.principal import Principal
+from martian.redteam.engine.budget import BudgetExhausted, Ledger, ResumeError
 from martian.redteam.engine.memory import StrategyLibraryError
 from martian.redteam.engine.plan import PlanError
 from martian.redteam.engine.report import for_report
@@ -53,7 +55,7 @@ from martian.redteam.engine.service import ServiceSelectionError
 from martian.redteam.model import RedteamRun
 from martian.redteam.runfile import RunFile
 from martian.redteam.server import RunStart
-from martian.redteam.store import RedteamStore
+from martian.redteam.store import RedteamStore, finished
 from martian.redteam.verify.canary import planted_run_file
 
 RESUMABLE = ("cancelled", "stopped", "failed")
@@ -117,6 +119,17 @@ class LocalLauncher:
             run_file = run_file.model_copy(update={"memory": memory})
         return run_file
 
+    @contextmanager
+    def _admission(self, principal: Principal, project_id: str, run_id: str) -> Iterator[tuple[ExitStack, bool]]:
+        if (project_id, run_id) in self.tasks:
+            raise HTTPException(409, "This red team run already has an active session")
+        with ExitStack() as lease:
+            try:
+                exclusive = lease.enter_context(self.store.run_session(project_id, run_id, principal=principal))
+            except ResumeError as error:
+                raise HTTPException(409, str(error)) from None
+            yield lease, exclusive
+
     async def start(
         self,
         principal: Principal,
@@ -127,11 +140,32 @@ class LocalLauncher:
     ) -> RedteamRun:
         """Start a run of ``request.run_file``, against the local target ``target_id`` if given, or
         go on with ``earlier``, a run of the same file (:meth:`resume`)."""
+        project_id = earlier.project_id if earlier is not None else request.project_id
+        run_id = earlier.id if earlier is not None else request.request_id or f"redteam-{uuid4().hex[:12]}"
+        request = request.model_copy(update={"project_id": project_id, "request_id": run_id})
+        with self._admission(principal, project_id, run_id) as (lease, exclusive):
+            if earlier is not None and await self.store.get(project_id, run_id, principal=principal) != earlier:
+                raise HTTPException(409, "The saved run changed before it could resume")
+            return await self._launch(principal, request, target_id, lease, earlier, recover_interrupted=exclusive)
+
+    async def _launch(
+        self,
+        principal: Principal,
+        request: RunStart,
+        target_id: str | None,
+        lease: ExitStack,
+        earlier: RedteamRun | None,
+        *,
+        recover_interrupted: bool,
+    ) -> RedteamRun:
         run_file = self._run_file(request.run_file)
         if missing := unsupported(run_file):
             raise HTTPException(422, "; ".join(missing))
         stack = AsyncExitStack()
         try:
+            if earlier is not None:
+                # Refuse before opening sessions or replacing any part of the stored run.
+                Ledger(run_file.budget).restore(earlier)
             service, provenance = build_service(
                 run_file, stack, self.environ if self.environ is not None else os.environ
             )
@@ -164,9 +198,19 @@ class LocalLauncher:
                 resume=earlier,
                 canary=canary,
             )
-        except HTTPException:
+            key = (engine.project_id, engine.run_id)
+            if key in self.tasks or (
+                earlier is None and await self.store.get(request.project_id, engine.run_id, principal=principal)
+            ):
+                raise HTTPException(409, "A red team run already has this id")
+            first = engine.snapshot("running")
+            if earlier is None:
+                await keep(first)
+            else:
+                await self.store.claim_resume(earlier, principal=principal, recover_interrupted=recover_interrupted)
+        except (BudgetExhausted, ResumeError) as error:
             await stack.aclose()
-            raise
+            raise HTTPException(409, str(error)) from None
         except (
             ServiceSelectionError,
             TargetUnavailable,
@@ -181,22 +225,23 @@ class LocalLauncher:
         except (FileNotFoundError, ImportError, AttributeError):
             await stack.aclose()
             raise HTTPException(422, "Could not load the target: check its file and function") from None
-        if (engine.project_id, engine.run_id) in self.tasks or (
-            earlier is None and await self.store.get(request.project_id, engine.run_id, principal=principal)
-        ):
+        except BaseException:
             await stack.aclose()
-            raise HTTPException(409, "A red team run already has this id")
-        first = engine.snapshot("running")
-        await keep(first)
+            raise
 
         async def go() -> None:
             async with stack:
                 await engine.run()
 
         task = asyncio.create_task(go())
-        key = (engine.project_id, engine.run_id)
         self.tasks[key] = task
-        task.add_done_callback(lambda _: self.tasks.pop(key, None))
+        active_lease = lease.pop_all()
+
+        def release(_: asyncio.Task[None]) -> None:
+            active_lease.close()
+            self.tasks.pop(key, None)
+
+        task.add_done_callback(release)
         return first
 
     def _kept_file(self, mapping: dict[str, Any]) -> dict[str, Any]:
@@ -207,38 +252,55 @@ class LocalLauncher:
         return mapping
 
     async def stop(self, principal: Principal, project_id: str, run_id: str) -> RedteamRun:
-        task = self.tasks.get((project_id, run_id))
+        key = (project_id, run_id)
+        task = self.tasks.get(key)
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        run = await self.store.get(project_id, run_id, principal=principal)
-        if run is None:
-            raise HTTPException(404, "Red team run not found")
-        if self._orphan(run):
-            run = run.model_copy(update={"state": "cancelled"})
-            await self.store.save(run, principal=principal)
-        return run
+        with self._admission(principal, project_id, run_id):
+            run = await self.store.get(project_id, run_id, principal=principal)
+            if run is None:
+                raise HTTPException(404, "Red team run not found")
+            if self._orphan(run):
+                run = finished(
+                    run.model_copy(
+                        update={
+                            "state": "cancelled",
+                            "budget": {**run.budget, "history_incomplete": True},
+                            "limitations": [
+                                *run.limitations,
+                                "The process stopped before a final budget checkpoint. "
+                                "Recorded spend is a lower bound.",
+                            ],
+                        }
+                    )
+                )
+                await self.store.save(run, principal=principal)
+            return run
 
     async def resume(self, principal: Principal, project_id: str, run_id: str) -> RedteamRun:
         """Go on with a stopped, cancelled or failed run with the run file and local target it was
         started with. Each finished attempt whose fingerprint is unchanged is kept, and the rest run
         again; what the earlier session spent still counts against the budget."""
-        earlier = await self.store.get(project_id, run_id, principal=principal)
-        if earlier is None:
-            raise HTTPException(404, "Red team run not found")
-        launch = earlier.provenance.get("launch")
-        if not isinstance(launch, dict) or not isinstance(launch.get("run_file"), dict):
-            raise HTTPException(
-                409,
-                "This run was not started here, so its run file is not kept: "
-                f"resume it with martian redteam run FILE --resume {run_id}",
+        with self._admission(principal, project_id, run_id) as (lease, exclusive):
+            earlier = await self.store.get(project_id, run_id, principal=principal)
+            if earlier is None:
+                raise HTTPException(404, "Red team run not found")
+            launch = earlier.provenance.get("launch")
+            if not isinstance(launch, dict) or not isinstance(launch.get("run_file"), dict):
+                raise HTTPException(
+                    409,
+                    "This run was not started here, so its run file is not kept: "
+                    f"resume it with martian redteam run FILE --resume {run_id}",
+                )
+            if earlier.state not in RESUMABLE and not self._orphan(earlier):
+                raise HTTPException(
+                    409, f"Only a stopped, cancelled or failed run can be resumed; this one is {earlier.state}"
+                )
+            request = RunStart(project_id=project_id, run_file=launch["run_file"], request_id=run_id)
+            return await self._launch(
+                principal, request, launch.get("target_id"), lease, earlier, recover_interrupted=exclusive
             )
-        if earlier.state not in RESUMABLE and not self._orphan(earlier):
-            raise HTTPException(
-                409, f"Only a stopped, cancelled or failed run can be resumed; this one is {earlier.state}"
-            )
-        request = RunStart(project_id=project_id, run_file=launch["run_file"], request_id=run_id)
-        return await self.start(principal, request, target_id=launch.get("target_id"), earlier=earlier)
 
     async def close(self) -> None:
         """Cancel every run still going."""

@@ -520,6 +520,10 @@ class Budget(_Model):
     attempts_per_probe: int = Field(default=1, ge=1, le=100)
     max_concurrent: int = Field(default=2, ge=1, le=64)
 
+    @property
+    def limits_model_spend(self) -> bool:
+        return self.tokens is not None or self.cost_usd is not None
+
 
 class Delivery(_Model):
     """How an attack reaches the agent. ``message`` (the default): it is the user message.

@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from martian._privacy import RedactionPolicy
 from martian.redteam.model import Check, CheckKind, CheckResult, EvidenceLevel, Probe, ToolCall
 from martian.redteam.verify.rules import judge_result
-from martian.redteam.verify.verifiers import Meter, Observation, VerifierFailed, result
+from martian.redteam.verify.verifiers import Meter, Observation, VerifierFailed, meter_model_call, result
 from martian_redteam.client import ClientError, UndecidedJudgment
 from martian_redteam.types import EvaluatorContext, RedteamService
 
@@ -63,22 +63,20 @@ class ServiceJudge:
             attack_method=probe.attack_method,
             criteria=check.spec.get("criteria") or probe.criteria,
         )
-        if meter is not None:
-            meter.reserve("judge")
         try:
-            judged = await self.service.evaluate(
-                context,
-                attack=seen.attack,
-                target_output=seen.reply,
-                tools_called=[call.name for call in seen.tool_calls],
-            )
+            async with meter_model_call(meter, "judge") as reported:
+                judged = await self.service.evaluate(
+                    context,
+                    attack=seen.attack,
+                    target_output=seen.reply,
+                    tools_called=[call.name for call in seen.tool_calls],
+                )
+                reported(judged.usage)
         except UndecidedJudgment as error:
             found = result(self, check, seen, None, source="judge:service")
             return found.model_copy(update={"error": str(error)})
         except ClientError as error:
             raise VerifierFailed(failure_kind(error), failure_code(error, "judge_failed"), str(error)) from None
-        if meter is not None:
-            meter.record(judged.usage)
         # The service scores 0 when the target was vulnerable: that is a hit.
         hit = judge_result(judged.score == 0)
         detail: dict[str, Any] = {}
@@ -98,7 +96,11 @@ def judge_for(run_file: RunFile, service: RedteamService) -> Any:
     """The run's judge verifier: on the SDK's judge engine with ``models.judge`` when the run file
     names one, else the service's own judge."""
     if run_file.models.judge is not None:
-        return EngineJudge(run_file.models.judge, redaction_policy=service.redaction_policy)
+        return EngineJudge(
+            run_file.models.judge,
+            redaction_policy=service.redaction_policy,
+            spend_capped=run_file.budget.limits_model_spend,
+        )
     return ServiceJudge(service)
 
 
@@ -143,12 +145,13 @@ class EngineJudge:
         max_retries: int = 2,
         rate_limit_wait_seconds: float = 60.0,
         redaction_policy: RedactionPolicy | None = None,
+        spend_capped: bool = False,
     ) -> None:
         from martian.evals.judges import RESPONSE_RUBRICS_VERSION
 
         self.model = model
-        self.max_retries = max_retries
-        self.rate_limit_wait_seconds = rate_limit_wait_seconds
+        self.max_retries = 0 if spend_capped else max_retries
+        self.rate_limit_wait_seconds = 0 if spend_capped else rate_limit_wait_seconds
         self.redaction_policy = redaction_policy or RedactionPolicy()
         self.version = f"{RUBRIC_JUDGE}+{RESPONSE_RUBRICS_VERSION}"
         self._scorer: Any = None
@@ -169,6 +172,7 @@ class EngineJudge:
         return self._scorer
 
     async def verify(self, check: Check, seen: Observation, meter: Meter | None = None) -> CheckResult:
+        from martian.evals._judge_transport import StructuredReplyError
         from martian.redteam.engine.hostile import scrub_secrets, secret_values
         from martian.redteam.engine.local import _usage
 
@@ -180,20 +184,28 @@ class EngineJudge:
             "context": f"Tools the target called: {tools}",
         }
         reply = scrub_secrets(seen.reply, hidden)
+        if not reply.strip():
+            undecided = result(self, check, seen, None, source=source)
+            return undecided.model_copy(update={"error": "the judgment could not be read [judge_unreadable]"})
         expectations = {"rubric": rubric_of(seen.probe, check.spec.get("criteria"))}
-        if meter is not None:
-            meter.reserve("judge")
         try:
-            feedback = await asyncio.to_thread(self._judge(), inputs=inputs, outputs=reply, expectations=expectations)
+            scorer = self._judge()
+            async with meter_model_call(meter, "judge") as reported:
+                try:
+                    feedback = await asyncio.to_thread(scorer, inputs=inputs, outputs=reply, expectations=expectations)
+                except StructuredReplyError as error:
+                    if meter is not None:
+                        reported(_usage(error.metadata))
+                    raise
+                metadata = dict(feedback.metadata or {})
+                if meter is not None:
+                    reported(_usage(metadata))
         except ValueError as error:
             code = (found.group(1) if (found := _CODE.search(str(error))) else "") or "judge_unreadable"
             if code.startswith("judge_provider"):
                 raise VerifierFailed("judge", code, str(error)) from None
             undecided = result(self, check, seen, None, source=source)
             return undecided.model_copy(update={"error": f"the judgment could not be read [{code}]"})
-        metadata = dict(feedback.metadata or {})
-        if meter is not None:
-            meter.record(_usage(metadata))
         citations = [
             {"start": item["start"], "end": item["end"], "segments": item["segment_ids"]}
             for item in json.loads(metadata.get("martian.judge.citations", "[]"))
