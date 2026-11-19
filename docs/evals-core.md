@@ -1171,10 +1171,11 @@ app = create_app(store=store, records=records, principal=lambda: SINGLE_USER, wo
   and holds it for `lease_seconds`, renewing it every third of the lease while the work runs. A
   claim moves a row only while the row is still claimable, in one statement; on Postgres it also
   locks the row it read and skips rows another claim has locked (`FOR UPDATE SKIP LOCKED`). So two
-  workers never hold one piece of work. Every change to a claimed row names the claim's token, so
-  a worker whose lease ran out changes nothing any more, and a worker that finds its claim taken
-  stops the work at its next renewal. Lease times are each worker's own clock in UTC: the hosts of
-  workers that share a queue need clocks within a small part of the lease.
+  workers never hold one piece of work. A worker stops when renewal is refused or its last
+  confirmed lease runs out. Record transactions and queue changes lock the current claim and
+  check its token and expiry before committing progress. A target request already delivered
+  to an external system may finish there after the worker stops. Hosts that share a queue
+  need UTC clocks within a small part of the lease.
 - **Fair between organisations.** The row a claim takes is the oldest of the organisation with the
   fewest rows running, counted in the same query on SQLite and on Postgres: a row is running while
   a claim whose lease has not run out holds it, a recording included, across every worker of the

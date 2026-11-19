@@ -80,6 +80,7 @@ from typing import TYPE_CHECKING, Any
 
 from martian.evals.model import Run, Target
 from martian.evals.records import RecordStore
+from martian.evals.records.lease import current_work_lease
 from martian.evals.records.queue import RECORDING, Claim, SqlWorkQueue
 from martian.evals.store import StoreError
 from martian.evals.worker import Runner, Work, alert_channels
@@ -226,13 +227,14 @@ class QueueWorker:
                 if len(turns) >= self._concurrency:
                     await asyncio.wait(turns, return_when=asyncio.FIRST_COMPLETED)
                     continue
+                deadline = loop.time() + self._lease
                 claim = await self._next()
                 if claim is None:
                     self._wake.clear()
                     with contextlib.suppress(TimeoutError):
                         await asyncio.wait_for(self._wake.wait(), self._poll)
                     continue
-                turn = loop.create_task(self._turn(claim), name=f"martian-queue-work-{claim.id}")
+                turn = loop.create_task(self._turn(claim, deadline), name=f"martian-queue-work-{claim.id}")
                 turns.add(turn)
                 turn.add_done_callback(turns.discard)
         finally:
@@ -240,11 +242,16 @@ class QueueWorker:
                 turn.cancel()
             await asyncio.gather(*turns, return_exceptions=True)
 
-    async def _turn(self, claim: Claim) -> None:
+    async def _turn(self, claim: Claim, deadline: float) -> None:
+        if asyncio.get_running_loop().time() >= deadline:
+            return
+        active = current_work_lease.set(claim.ownership())
         try:
-            await self._handle(claim)
+            await self._handle(claim, deadline)
         except Exception:  # noqa: BLE001 - the database is away; the claim runs out and is taken again
             log.exception("The worker could not end its turn on %s", claim.id)
+        finally:
+            current_work_lease.reset(active)
 
     async def drain(self) -> None:
         """Wait until the queue holds no work, of any organisation: for the local edition and for
@@ -259,7 +266,7 @@ class QueueWorker:
             log.exception("The worker could not read its queue")
             return None
 
-    async def _handle(self, claim: Claim) -> None:
+    async def _handle(self, claim: Claim, deadline: float) -> None:
         work = load_work(claim.work)
         if claim.kind == RECORDING:  # the process recording this run stopped before it ended
             await self._interrupted(work)
@@ -285,7 +292,7 @@ class QueueWorker:
             return
         running = asyncio.get_running_loop().create_task(self._run(work))
         try:
-            ended = await self._hold(claim, running)
+            ended = await self._hold(claim, running, deadline)
         except asyncio.CancelledError:
             running.cancel()
             await asyncio.gather(running, return_exceptions=True)
@@ -372,27 +379,34 @@ class QueueWorker:
         if work.kind == "run":
             await after_scheduled_run(self._records, self, work)
 
-    async def _hold(self, claim: Claim, running: asyncio.Task[None]) -> bool:
-        """Renew the claim while the work runs. True once the work has ended; False when it stopped
-        with an error, which leaves the claim to run out so the next worker takes it again, or when
-        another worker took the claim, which stops the work."""
-        while True:
-            done, _ = await asyncio.wait({running}, timeout=self._lease / 3)
+    async def _hold(self, claim: Claim, running: asyncio.Task[None], deadline: float) -> bool:
+        """Keep working only during a confirmed lease, even if renewal cannot reach the database."""
+        loop = asyncio.get_running_loop()
+        while (remaining := deadline - loop.time()) > 0:
+            done, _ = await asyncio.wait({running}, timeout=min(remaining, self._lease / 3))
             if done:
                 if running.cancelled() or (error := running.exception()) is not None:
                     log.error("The worker stopped on %s: %r", claim.id, None if running.cancelled() else error)
                     return False
-                return True
+                return loop.time() < deadline
+            started = loop.time()
+            if started >= deadline:
+                break
             try:
-                renewed = await self._queue.renew(claim, self._lease)
+                async with asyncio.timeout_at(deadline):
+                    renewed = await self._queue.renew(claim, self._lease)
+            except TimeoutError:
+                break
             except Exception:  # noqa: BLE001 - the database is away; try again at the next renewal
                 log.exception("The worker could not renew its claim on %s", claim.id)
                 continue
             if not renewed:
-                log.warning("Another worker took %s after this worker's lease ran out; stopping it here", claim.id)
-                running.cancel()
-                await asyncio.gather(running, return_exceptions=True)
-                return False
+                break
+            deadline = started + self._lease
+        log.warning("The worker lost its confirmed lease on %s; stopping work", claim.id)
+        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
+        return False
 
 
 __all__ = [

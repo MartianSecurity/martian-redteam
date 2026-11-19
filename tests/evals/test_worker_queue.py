@@ -32,11 +32,13 @@ from sqlalchemy import create_engine, text, update
 from martian.evals.model import Case, CaseResult, Run, ScoringJob, StoreRef, Target
 from martian.evals.records import Event
 from martian.evals.records import queue as queue_module
+from martian.evals.records import sql as sql_module
+from martian.evals.records.lease import current_work_lease
 from martian.evals.records.queue import RECORDING, SqlWorkQueue
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.records.tables import work_queue
 from martian.evals.server import DEFAULT_PROJECT, ENTERPRISE, SINGLE_USER, create_app
-from martian.evals.store import EvalStore, MemoryStore
+from martian.evals.store import EvalStore, MemoryStore, StoreError
 from martian.evals.worker import (
     InProcessWorker,
     InterruptedRuns,
@@ -90,6 +92,7 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
     or later than the test says however slow the machine is."""
     found = Clock()
     monkeypatch.setattr(queue_module, "_now", found)
+    monkeypatch.setattr(sql_module, "_now", found)
     return found
 
 
@@ -125,6 +128,9 @@ class QueueContract:
         assert await queue.held(ORG_A, "p1", "run:r1") and await queue.claim(60) is None
         clock.advance(0.3)
         assert not await queue.held(ORG_A, "p1", "run:r1")
+        assert not await queue.renew(held, 60)
+        assert not await queue.reschedule(held, clock.now)
+        await queue.done(held)
         taken = await queue.claim(60)
         assert taken is not None and (taken.id, taken.attempt) == ("run:r1", 2) and taken.token != held.token
         # The worker whose lease ran out changes nothing any more.
@@ -294,6 +300,34 @@ async def stored(records: SqlRecordStore, run: Run) -> Run:
     found = await records.get_run(SINGLE_USER, DEFAULT_PROJECT, run.id)
     assert found is not None
     return found
+
+
+async def test_record_updates_require_the_current_queue_claim(
+    records: SqlRecordStore, queue: SqlWorkQueue, clock: Clock
+) -> None:
+    run, work = await queued_run(MemoryStore(), records)
+    await queue.put(work.principal, work.project_id, entry_id(work), work.kind, {})
+    original = await queue.claim(1)
+    assert original is not None
+    running = run.model_copy(update={"state": "running"})
+    clock.advance(2)
+
+    scope = current_work_lease.set(original.ownership())
+    try:
+        with pytest.raises(StoreError, match="current work lease"):
+            await records.update_run(work.principal, running)
+    finally:
+        current_work_lease.reset(scope)
+    assert (await stored(records, run)).state == "queued"
+
+    replacement = await queue.claim(60)
+    assert replacement is not None
+    scope = current_work_lease.set(replacement.ownership())
+    try:
+        await records.update_run(work.principal, running)
+    finally:
+        current_work_lease.reset(scope)
+    assert (await stored(records, run)).state == "running"
 
 
 def calls(folder: Path, case_id: str) -> list[str]:
@@ -538,7 +572,7 @@ async def test_a_worker_whose_claim_another_took_stops_its_work(
         engine.dispose()
 
         async def stopped() -> bool:
-            return "Another worker took" in caplog.text
+            return "lost its confirmed lease" in caplog.text
 
         await eventually(stopped)  # the worker's next renewal found the claim gone, and stopped the run
         (tmp_path / "release").touch()
