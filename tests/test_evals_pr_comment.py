@@ -496,21 +496,28 @@ def test_names_cannot_break_the_table_the_marker_or_mention_anyone():
     assert comment.marker("x --> <script>").count("-->") == 1
 
 
-@pytest.mark.parametrize("name", ["passing", "failing", "compared"])
-def test_action_writes_the_job_summary_without_github_credentials(sample_runs, tmp_path, name):
-    folder, code = sample_runs[name]
-    summary = tmp_path / "summary.md"
-    env = {
-        "MARTIAN_EVALS_SUITE": SUITE.replace("/failing/", "/passing/") if name == "passing" else SUITE,
+def action_env(folder, exit_code, summary, **extra):
+    """What the composite action's summary step passes to the renderer."""
+    return {
+        "MARTIAN_EVALS_SUITE": SUITE,
         "MARTIAN_EVALS_OUTPUT": str(folder),
-        "MARTIAN_EVALS_EXIT_CODE": str(code),
+        "MARTIAN_EVALS_EXIT_CODE": str(exit_code),
         "MARTIAN_EVALS_SHA": SHA,
         "GITHUB_EVENT_NAME": "pull_request",
         "GITHUB_REPOSITORY": "example/agent",
         "GITHUB_SERVER_URL": "https://github.com",
         "GITHUB_RUN_ID": "1",
         "GITHUB_STEP_SUMMARY": str(summary),
+        **extra,
     }
+
+
+@pytest.mark.parametrize("name", ["passing", "failing", "compared"])
+def test_action_writes_the_job_summary_without_github_credentials(sample_runs, tmp_path, name):
+    folder, code = sample_runs[name]
+    summary = tmp_path / "summary.md"
+    suite = SUITE.replace("/failing/", "/passing/") if name == "passing" else SUITE
+    env = action_env(folder, code, summary, MARTIAN_EVALS_SUITE=suite)
     if name == "compared":
         env.update(MARTIAN_EVALS_BASELINE_BRANCH="main", MARTIAN_EVALS_BASELINE_SHA=BASE_SHA)
     assert comment.main(env) == 0

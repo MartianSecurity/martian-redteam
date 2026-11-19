@@ -1,8 +1,8 @@
-"""Red team results in the evals action's pull-request comment (martian-notes#285).
+"""Red team results in the evals action's job summary (martian-notes#285).
 
 The sample under examples/github-action/redteam runs through the CLI as the action's red team step
 runs it, with the Martian connection variables cleared and a loopback server for the models, and its
-comment must be the checked-in comments/redteam.md."""
+summary must be the checked-in comments/redteam.md."""
 
 import ipaddress
 import json
@@ -16,15 +16,7 @@ from typer.testing import CliRunner
 
 from martian.cli import app
 from tests.redteam.fake_models import RUBRIC_JUDGE, field
-from tests.test_evals_pr_comment import (  # noqa: F401 - github is a fixture
-    BOT,
-    RUN_URL,
-    SAMPLE,
-    SHA,
-    action_env,
-    comment,
-    github,
-)
+from tests.test_evals_pr_comment import RUN_URL, SAMPLE, SHA, action_env, comment
 
 ROOT = Path(__file__).resolve().parents[2]
 RUN_FILE = "examples/github-action/redteam/redteam.yaml"
@@ -64,7 +56,7 @@ def sample(models, tmp_path, monkeypatch):
     return output, result, seen
 
 
-def test_the_sample_repository_shows_the_checked_in_comment(sample):
+def test_the_sample_repository_shows_the_checked_in_summary(sample):
     output, result, _ = sample
     assert result.exit_code == 1, result.output
     body = comment.with_redteam(
@@ -107,32 +99,28 @@ def test_the_action_fails_with_the_worse_of_the_two_exit_codes(evals, redteam, e
     assert subprocess.run(["bash", "-c", script], env=env, check=False).returncode == expected
 
 
-def test_one_comment_holds_the_suite_and_the_red_team_run(github, sample, tmp_path, monkeypatch):  # noqa: F811
+def test_one_summary_holds_the_suite_and_the_red_team_report(sample, tmp_path, monkeypatch):
     output, result, _ = sample
     folder = tmp_path / "evals"
+    summary = tmp_path / "summary.md"
     monkeypatch.chdir(ROOT)
     evals = CliRunner().invoke(app, ["evals", "run", str(SAMPLE / "passing" / "evals.yaml"), "--output", str(folder)])
     environ = action_env(
-        github,
         folder,
         evals.exit_code,
-        tmp_path / "summary.md",
+        summary,
         MARTIAN_EVALS_SUITE="examples/github-action/passing/evals.yaml",
         MARTIAN_REDTEAM_RUN_FILE=RUN_FILE,
         MARTIAN_REDTEAM_OUTPUT=str(output),
         MARTIAN_REDTEAM_EXIT_CODE=str(result.exit_code),
     )
     assert comment.main(environ) == 0
-    [ours] = [c for c in github.comments if c["user"]["login"] == BOT]
-    body = ours["body"]
-    assert body.startswith(comment.marker("examples/github-action/passing/evals.yaml") + "\n")
-    assert body.count("<!-- martian-evals-comment") == 1
+    body = summary.read_text(encoding="utf-8")
     assert body.index("### Martian evals passed") < body.index("### Martian red team failed")
-    assert body.rstrip().splitlines()[-1].endswith("Updated on every push")
-    # A red team run alone keys the comment by its run file.
-    alone = dict(environ, MARTIAN_EVALS_SUITE="")
-    assert comment.main(alone) == 0
-    assert any(c["body"].startswith(comment.marker(RUN_FILE)) for c in github.comments)
+    assert body.rstrip().splitlines()[-1].endswith(f"[Workflow run]({RUN_URL})")
+    standalone = tmp_path / "standalone.md"
+    assert comment.main(dict(environ, MARTIAN_EVALS_SUITE="", GITHUB_STEP_SUMMARY=str(standalone))) == 0
+    assert standalone.read_text(encoding="utf-8").startswith(comment.marker(RUN_FILE))
 
 
 def test_a_red_team_run_that_could_not_start_says_so(tmp_path):
