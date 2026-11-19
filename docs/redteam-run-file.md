@@ -251,6 +251,9 @@ Each entry of `proxy` takes these fields:
 
 `tools.session_api` is the agent's session API, as a cloud agent has one: before the first attack the run posts the proxy's session (in an environment, the server's) to `{session_api}/sessions` and expects its `session_id` back. Either way the run writes the session to `tool-session.json` in `output_folder`, readable by its user only, and removes it when the run ends; after that the proxy refuses it. The agent binds its tools with `bind_tools(session, action_id=...)`, passing the conversation's id (the body's `{{session_id}}`) as the action id, so each attempt's calls are its own.
 
+Use a separate output directory for each active session. Each handoff creates a private temporary
+file and replaces `tool-session.json` atomically.
+
 The proxy is not an environment. It simulates no application and holds no data. [Red team targets](redteam-targets.md#recording-proxy) describes it.
 
 ## Verification

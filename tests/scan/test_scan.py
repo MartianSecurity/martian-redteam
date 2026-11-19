@@ -82,6 +82,31 @@ def test_a_seeded_finding_fails_the_gate_with_file_line_and_level(tmp_path):
                                "skills/release-notes/scripts/collect.sh"]  # fmt: skip
 
 
+def test_export_leaves_unrelated_sibling_files_alone(tmp_path):
+    destination = tmp_path / "scan.sarif"
+    unrelated = tmp_path / "scan.sarif.partial"
+    unrelated.write_text("keep me")
+    code, _ = _run(Transport(FakeScanner(seeded=False)), sarif_path=destination)
+    assert code == EXIT_PASSED and json.loads(destination.read_text())["version"] == "2.1.0"
+    assert unrelated.read_text() == "keep me"
+
+
+def test_implicit_policy_must_be_within_the_scan_root(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "AGENTS.md").write_text("ordinary instructions")
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "scan.yml").write_text("version: 1")
+    (repo / ".martian").symlink_to(other, target_is_directory=True)
+    scanner = FakeScanner(seeded=False)
+    code, printed = _run(Transport(scanner), folder=repo)
+    assert code == EXIT_ERROR and "symbolic link" in printed.text
+    assert scanner.policies == [] and scanner.uploads == []
+    allowed, _ = _run(Transport(scanner), folder=repo, include=("/AGENTS.md",), policy_path=other / "scan.yml")
+    assert allowed == EXIT_PASSED
+
+
 def test_a_clean_scan_passes(monkeypatch):
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     monkeypatch.setenv("GITHUB_REPOSITORY", "acme/agents")

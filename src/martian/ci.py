@@ -51,7 +51,7 @@ class _ScanItem(pytest.Item):
         self.ci = ci
 
     def runtest(self) -> None:
-        from martian.scan import ScanOptions, scan
+        from martian.scan import ScanOptions, scan, write_export
 
         assert self.suite.scan is not None
         destination = self.suite.output_dir / "scan"
@@ -77,7 +77,7 @@ class _ScanItem(pytest.Item):
             raise GateFailure(reason) from None
         finally:
             destination.mkdir(mode=0o700, parents=True, exist_ok=True)
-            (destination / "scan.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            write_export(destination / "scan.log", ("\n".join(lines) + "\n").encode("utf-8"))
         report: dict[str, Any] = {"scan_id": str(outcome.scan_id)} if outcome.scan_id else {}
         failure = ""
         if outcome.gate_id is not None:

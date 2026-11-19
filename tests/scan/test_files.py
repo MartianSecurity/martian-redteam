@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from martian.scan import files
 from martian.scan.files import DEFAULT_INCLUDE, FAMILIES, SelectionError, SymlinkOutside, collect, family_of, pack
 from tests.scan.fake_backend import content_digest
 
@@ -173,6 +174,22 @@ def test_nothing_to_send_is_an_error(tmp_path):
         pack(collect(tmp_path))
     with pytest.raises(SelectionError, match="does not exist"):
         collect(tmp_path / "missing")
+
+
+def test_cached_paths_and_archive_reads_do_not_follow_a_linked_parent(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    _write(root, {"docs/AGENTS.md": "inside"})
+    monkeypatch.setattr(files, "_git_candidates", lambda _: ["docs/AGENTS.md"])
+    selected = collect(root)
+    assert selected.files == ("docs/AGENTS.md",)
+
+    (root / "docs").rename(tmp_path / "other")
+    (root / "docs").symlink_to(tmp_path / "other", target_is_directory=True)
+    with pytest.raises(SymlinkOutside) as refused:
+        collect(root)
+    assert refused.value.paths == ["docs"]
+    with pytest.raises(SelectionError, match="symbolic link"):
+        pack(selected)
 
 
 def test_the_default_paths_are_paths_only():

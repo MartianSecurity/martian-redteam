@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from martian.evals.agreement import question_agreement, queue_agreement
-from martian.evals.model import Review, ReviewQuestion, ReviewQueue
+from martian.evals.model import Review, ReviewQuestion, ReviewQueue, Score
 from martian.evals.records import BlindQueue, LabelledItem
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import DEFAULT_PROJECT, ENTERPRISE, organisation_principal
@@ -164,9 +164,14 @@ def test_reviewer_agreement_rests_on_the_answers_given_blind_and_says_so(served:
     # Across queues, a question a blind queue asks rests on the blind queues' blind answers only.
     (tone,) = report["questions"]
     assert (tone["question"], tone["blind"], tone["shared"], tone["agreed"]) == ("polite_tone", True, 2, 1)
+    served.act_as(organisation_principal("unanswered", "org-a", frozenset({"viewer"})))
+    hidden = served.call("GET", "/v1/evals/reviewer-agreement", 200)
+    found = {q["queue_id"]: q["questions"][0] for q in hidden["queues"]}
+    assert (found[blind.id]["answered"], found[blind.id]["shared"]) == (0, 0)
+    assert (found[open_.id]["shared"], found[open_.id]["agreed"]) == (2, 2)
 
 
-def test_a_calibration_shows_no_label_of_a_blind_item_its_reader_has_not_answered(served: Served):
+def test_a_calibration_counts_only_labels_the_reader_can_see(served: Served):
     queue = Queue(served, blind=True)
     first = queue.items[0]
     queue.give(first, False, "Admin.")
@@ -177,15 +182,54 @@ def test_a_calibration_shows_no_label_of_a_blind_item_its_reader_has_not_answere
         id=str(uuid.uuid4()), project_id=DEFAULT_PROJECT, judge="polite_tone", version="1", labelled=2,
         items=[LabelledItem(run_id=queue.run["id"], case_id=case, label=False, verdict=True),
                LabelledItem(trace_id="tr-" + "1" * 32, label=True, verdict=True)],
-        report={"status": "too_few"}, created_at=T0,
+        report={"kind": "boolean", "status": "too_few", "confusion": {"false_pass": 1}}, created_at=T0,
     )  # fmt: skip
     asyncio.run(served.records.save_calibration(ADMIN, DEFAULT_PROJECT, calibration))
     path = f"/v1/evals/judge-calibrations/{calibration.id}"
     assert [i["label"] for i in served.call("GET", path, 200)["items"]] == [False, True]
+
     served.act_as(MEMBER)
-    assert [i["label"] for i in served.call("GET", path, 200)["items"]] == [None, True]
+    visible = served.call("GET", path, 200)
+    assert [i["label"] for i in visible["items"]] == [True]
+    assert visible["labelled"] == visible["report"]["labelled"] == 1
+    assert visible["report"]["confusion"]["false_pass"] == 0
     queue.give(first, True, "Member.")
     assert [i["label"] for i in served.call("GET", path, 200)["items"]] == [False, True]
+
+
+def test_hidden_answers_do_not_change_judge_agreement_for_the_reader(served: Served):
+    queue = Queue(served, blind=True)
+    run_id = queue.run["id"]
+    records = served.records
+
+    async def add_score():
+        first = next(
+            result
+            for result in (await records.list_results(ADMIN, DEFAULT_PROJECT, run_id)).items
+            if result.case_id == "faq-1"
+        )
+        score = Score(
+            run_id=run_id,
+            case_id=first.case_id,
+            scorer=QUESTION.name,
+            scorer_version="1",
+            source="llm_judge",
+            value=True,
+        )
+        await records.put_results(ADMIN, DEFAULT_PROJECT, [first], scores=[score])
+
+    asyncio.run(add_score())
+    route = "/v1/evals/judge-agreement"
+    served.act_as(MEMBER)
+    before = served.call("GET", route, 200, params={"name": QUESTION.name})
+    assert before["items"][0]["labelled"] == 0
+    served.act_as(ADMIN)
+    queue.give(queue.items[0], False, "First answer.")
+    served.act_as(MEMBER)
+    assert served.call("GET", route, 200, params={"name": QUESTION.name}) == before
+    queue.give(queue.items[0], True, "Second answer.")
+    after = served.call("GET", route, 200, params={"name": QUESTION.name})
+    assert after["items"][0]["labelled"] == 1
 
 
 # --- the rules, without the routes -------------------------------------------------------------

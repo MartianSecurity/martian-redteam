@@ -28,6 +28,8 @@ import os
 import stat
 import subprocess
 import zipfile
+from collections.abc import Iterator, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -117,6 +119,12 @@ class SymlinkOutside(SelectionError):
         )
 
 
+class LinkedParent(SelectionError):
+    def __init__(self, path: str) -> None:
+        self.path = path
+        super().__init__(f"cannot read through symbolic link {path!r}")
+
+
 @dataclass(frozen=True)
 class Skipped:
     path: str
@@ -141,6 +149,7 @@ class Packed:
     files: int
     unpacked_bytes: int
     hashes: dict[str, str] = field(repr=False)
+    git_oids: dict[str, tuple[str, str]] = field(default_factory=dict, repr=False)
 
 
 # --- patterns ------------------------------------------------------------------------------------
@@ -248,6 +257,69 @@ def _inside(root: Path, link: Path) -> bool:
     return target == root or root in target.parents
 
 
+@contextmanager
+def _directory(start: int, parts: Sequence[str]) -> Iterator[int]:
+    """Walk directories by descriptor. Only the current directory needs to stay open."""
+    current = start
+    try:
+        for index, part in enumerate(parts):
+            try:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+            except OSError:
+                if stat.S_ISLNK(os.stat(part, dir_fd=current, follow_symlinks=False).st_mode):
+                    raise LinkedParent("/".join(parts[: index + 1])) from None
+                raise
+            if current != start:
+                os.close(current)
+            current = child
+        yield current
+    finally:
+        if current != start:
+            os.close(current)
+
+
+@contextmanager
+def open_root(root: Path) -> Iterator[int]:
+    """Open a resolved scan root without trusting a path component that changed after resolution."""
+    if not (
+        hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+        and os.open in os.supports_dir_fd
+        and os.stat in os.supports_dir_fd
+        and os.stat in os.supports_follow_symlinks
+    ):
+        raise SelectionError("this platform cannot safely read a scan folder without following symbolic links")
+    with ExitStack() as stack:
+        try:
+            anchor = os.open(root.anchor, os.O_RDONLY | os.O_DIRECTORY)
+            stack.callback(os.close, anchor)
+            descriptor = stack.enter_context(_directory(anchor, root.parts[1:]))
+        except OSError:
+            raise SelectionError(f"cannot open the scan folder {str(root)!r}") from None
+        yield descriptor
+
+
+def _path_parts(path: str) -> list[str]:
+    parts = path.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        raise SelectionError(f"invalid scan path {path!r}")
+    return parts
+
+
+def read_regular(root: int, path: str, *, limit: int = -1) -> bytes:
+    """Read only a regular file reached without following links, including at open time."""
+    parts = _path_parts(path)
+    with _directory(root, parts[:-1]) as parent:
+        mode = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False).st_mode
+        if not stat.S_ISREG(mode):
+            raise SelectionError(f"{path!r} is not a regular file")
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise SelectionError(f"{path!r} is not a regular file")
+            return handle.read(limit)
+
+
 def _within(paths: tuple[str, ...]) -> tuple[str, ...]:
     found = []
     for path in paths:
@@ -308,37 +380,51 @@ def collect(
         return any(not prefix or path.startswith(prefix + "/") or prefix.startswith(path + "/") for prefix in whole)
 
     files: list[str] = []
-    skipped: list[Skipped] = []
-    outside: list[str] = []
-    for path in candidates:
-        full = root / path
-        try:
-            mode = full.lstat().st_mode
-        except FileNotFoundError:
-            continue  # tracked by Git but deleted in the work tree: there is nothing to send
-        except OSError:
-            raise SelectionError(f"cannot read {path}") from None
-        if stat.S_ISLNK(mode):
-            pointed_dir = full.is_dir()
-            if not (selected(path) or (pointed_dir and reachable_below(path))):
-                continue
-            if _inside(root, full):
-                skipped.append(Skipped(path, "symlink"))
-            else:
-                outside.append(path)
-            continue
-        if not selected(path):
-            continue
-        if not include and family_of(path, skills=tuple(skills), plugins=tuple(plugins)) not in wanted:
-            left_out.append(path)
-            continue
-        if stat.S_ISREG(mode):
-            files.append(path)
+    skipped: dict[str, Skipped] = {}
+    outside: set[str] = set()
+
+    def skip_link(path: str) -> None:
+        if _inside(root, root / path):
+            skipped[path] = Skipped(path, "symlink")
         else:
-            skipped.append(Skipped(path, "not_regular"))
+            outside.add(path)
+
+    with open_root(root) as descriptor:
+        for path in candidates:
+            parts = _path_parts(path)
+            try:
+                with _directory(descriptor, parts[:-1]) as parent:
+                    mode = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False).st_mode
+            except FileNotFoundError:
+                continue  # tracked by Git but deleted in the work tree: there is nothing to send
+            except LinkedParent as link:
+                if selected(path) or selected(link.path):
+                    skip_link(link.path)
+                continue
+            except OSError:
+                raise SelectionError(f"cannot read {path!r}") from None
+            if stat.S_ISLNK(mode):
+                if selected(path) or ((root / path).is_dir() and reachable_below(path)):
+                    skip_link(path)
+                continue
+            if not selected(path):
+                continue
+            if not include and family_of(path, skills=tuple(skills), plugins=tuple(plugins)) not in wanted:
+                left_out.append(path)
+                continue
+            if stat.S_ISREG(mode):
+                files.append(path)
+            else:
+                skipped[path] = Skipped(path, "not_regular")
     if outside:
-        raise SymlinkOutside(outside)
-    return Selection(root=root, files=tuple(files), skipped=tuple(skipped), git=git, left_out=tuple(left_out))
+        raise SymlinkOutside(sorted(outside))
+    return Selection(
+        root=root,
+        files=tuple(files),
+        skipped=tuple(skipped[path] for path in sorted(skipped)),
+        git=git,
+        left_out=tuple(left_out),
+    )
 
 
 # --- the archive ---------------------------------------------------------------------------------
@@ -363,24 +449,29 @@ def pack(selection: Selection) -> Packed:
         raise SelectionError("no file to scan: nothing in the folder matches the include patterns")
     buffer = io.BytesIO()
     hashes: dict[str, str] = {}
+    git_oids: dict[str, tuple[str, str]] = {}
     total = 0
-    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=False) as archive:
+    with (
+        open_root(selection.root) as root,
+        zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=False) as archive,
+    ):
         for path in sorted(selection.files):
             try:
                 path.encode("utf-8")
             except UnicodeEncodeError:
                 raise SelectionError(f"{path!r} is not a UTF-8 file name") from None
-            full = selection.root / path
-            # Opened without following a link swapped in after selection.
             try:
-                descriptor = os.open(full, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                data = read_regular(root, path)
             except OSError:
-                raise SelectionError(f"cannot read {path}") from None
-            with os.fdopen(descriptor, "rb") as handle:
-                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                    raise SelectionError(f"{path} is no longer a regular file")
-                data = handle.read()
+                raise SelectionError(f"cannot read {path!r}") from None
             hashes[path] = hashlib.sha256(data).hexdigest()
+            if selection.git:
+                header = f"blob {len(data)}\0".encode("ascii")
+                sha1 = hashlib.sha1(header, usedforsecurity=False)
+                sha256 = hashlib.sha256(header)
+                sha1.update(data)
+                sha256.update(data)
+                git_oids[path] = (sha1.hexdigest(), sha256.hexdigest())
             total += len(data)
             info = zipfile.ZipInfo(path, date_time=(1980, 1, 1, 0, 0, 0))
             info.create_system = 3
@@ -396,4 +487,5 @@ def pack(selection: Selection) -> Packed:
         files=len(hashes),
         unpacked_bytes=total,
         hashes=hashes,
+        git_oids=git_oids,
     )

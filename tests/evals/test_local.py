@@ -200,6 +200,22 @@ def test_one_process_serves_the_api_and_the_ui_on_loopback_and_opens_the_browser
             assert "<title>Martian Evals</title>" in client.get("/").text
             assert client.post("/v1/auth/refresh").json()["session"] == SESSION
             assert client.get("/v1/evals/bootstrap").json()["principal"]["kind"] == "single_user"
+            targets = "/v1/local/targets"
+            target = {
+                "name": "Loopback fixture",
+                "kind": "http",
+                "url": "http://127.0.0.1:9000",
+                "body": {"message": "{{input}}"},
+                "response_path": "reply.text",
+            }
+            assert client.post(targets, json=target, headers={"Origin": "https://example.invalid"}).status_code == 403
+            assert client.post(targets, json=target, headers={"Sec-Fetch-Site": "same-site"}).status_code == 403
+            assert client.get(targets).json()["items"] == []
+            created = client.post(
+                targets, json=target, headers={"Origin": url.rstrip("/"), "Sec-Fetch-Site": "same-origin"}
+            )
+            assert created.status_code == 201, created.text
+            assert client.get(targets).json()["items"] == [created.json()]
     finally:
         closed.set()
         for server in servers:

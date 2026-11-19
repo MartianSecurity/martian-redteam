@@ -30,7 +30,7 @@ from typing import Any
 
 import httpx
 
-from martian._privacy import safe_text
+from martian._privacy import RedactionPolicy, safe_text
 from martian.config import MartianConfig
 from martian.redteam.runfile import RunFile
 from martian_redteam.integration import AssessmentSession
@@ -83,13 +83,13 @@ def admission(run_file: RunFile, *, request_id: str, label: str | None = None) -
     return body
 
 
-def _reason(response: httpx.Response) -> str:
+def _reason(response: httpx.Response, policy: RedactionPolicy) -> str:
     try:
         detail = response.json().get("detail")
     except (ValueError, AttributeError):
         detail = None
     if isinstance(detail, str) and detail.strip():
-        return safe_text(detail.strip())[:300]
+        return safe_text(detail.strip(), policy=policy)[:300]
     return f"HTTP {response.status_code}"
 
 
@@ -119,7 +119,8 @@ class EnvironmentClient:
                 f"{what}: the Martian server could not be reached ({type(error).__name__})"
             ) from None
         if not response.is_success:
-            raise EnvironmentRunError(f"{what}: {_reason(response)}")
+            policy = self.config.redaction_policy.combine(RedactionPolicy.from_secrets(bearer))
+            raise EnvironmentRunError(f"{what}: {_reason(response, policy)}")
         try:
             found = response.json()
         except ValueError:

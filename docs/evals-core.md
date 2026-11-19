@@ -427,7 +427,7 @@ answering a queue through the review route, and its statistics, and
 `tests/evals/test_calibration.py` and `test_calibration_recheck.py` the calibration and re-check
 routes, and `tests/evals/test_blind_review.py` blind double review: a second reviewer reading
 nothing of the first answer through the routes until they answer, the answers given blind, a
-calibration's hidden labels, and the agreement on blind answers.
+viewer-specific calibration statistics, and the agreement on blind answers.
 `tests/evals/test_read_contract.py` checks each operation and the schemas it uses against a copy
 of the contract (`tests/evals/contracts/evals-api-v5.json`, unchanged from the server; see
 `tests/evals/evals_contract.py`) and validates the responses against it, with UUIDs and
@@ -607,8 +607,8 @@ All paths are under `/v1/evals`. How the core carries them out:
 - **Blind queues** (`martian.evals.server.blind`, [blind double review](evals.md#blind-double-review)).
   A reader who has not answered an item of a blind queue reads only its pending review and their
   own: `GET /reviews`, the workbench's `reviews`, `latest_reviews` and human `assessments`, the
-  turns route's checks and a calibration's item labels (`null`) leave the others out. An answer
-  names the review the reader was shown as `previous_id` and is added after the chain's newest,
+  and the turns route's checks leave the others out. Agreement and calibration reports use the
+  visible answers. A re-check requires access to all labels it uses. An answer names the review the reader was shown as `previous_id` and is added after the chain's newest,
   so a stale request is checked against what they may read. Its human score is not copied to the
   case's trace. A reviewer's first complete answer to the item has `blind: true`. Every queue the
   routes answer with (`GET /review-queues`, the workbench's `queues`, a queue's sync) has `blind`.
@@ -4155,10 +4155,8 @@ the others. With `MARTIAN_TEST_POSTGRES_URL` set it also copies a store on Postg
 
 ## Data export
 
-`martian evals export <folder>` exports everything the local edition's store and record store
-hold (not the worker's queue, the outbox, a threshold's webhook secret, the local targets and
-their keys, or `settings.json`), and
-`martian evals import martian <folder>` loads an export into a data folder that holds no data
+`martian evals export <folder>` writes portable records with transport settings and known
+credentials redacted. `martian evals import martian <folder>` loads the records into a data folder that holds no data
 yet (`martian.evals.data_export`); `--data-dir` names the data folder as for `martian ui`. An
 interrupted export resumes when it is run again into the same folder. An install that runs the
 core in its own process calls `export_data` and `import_data` with its store, record store and the
@@ -4189,7 +4187,15 @@ and version, written by the export's own code (`run_records` and `export_line` i
 `martian.evals.data_export`): the run's `runs.jsonl` line, its project's `projects.jsonl` line, and
 its `scoring_jobs.jsonl`, `case_results.jsonl`, `scores.jsonl` and `traces.jsonl` lines. A server
 reads only its own version (`VERSION` in `martian.evals.data_export`) and refuses another with
-`422`. A batch of cases:
+`422`. Both Evals push routes require the run and any `store_run` copy to have `kind: eval`.
+Red Team records use the [Red Team push route](redteam-api.md#pushed-runs).
+
+The SDK uses the [export credential projection](data-export.md#what-an-export-holds) for
+pushes. The receiver refuses run and scoring-job records with inline private transport
+settings (`422`). An older copy with different content can produce `409` on retry.
+Historical records need separate review.
+
+A batch of cases:
 
 ```json
 {"format": "martian-evals-export", "version": 4,

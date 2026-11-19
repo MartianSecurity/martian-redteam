@@ -14,8 +14,8 @@ from __future__ import annotations
 import json
 import os
 import re
-import stat
 import subprocess
+import tempfile
 import unicodedata
 import uuid
 from collections.abc import Callable
@@ -27,7 +27,17 @@ from uuid import UUID
 from martian._privacy import safe_text
 from martian.config import ConfigError, MartianConfig
 from martian.scan.client import Finding, Gate, Policy, PolicyRefused, Scan, ScanApiError, ScanClient
-from martian.scan.files import DEFAULT_INCLUDE, FAMILIES, Packed, Selection, SelectionError, collect, pack
+from martian.scan.files import (
+    DEFAULT_INCLUDE,
+    FAMILIES,
+    Packed,
+    Selection,
+    SelectionError,
+    collect,
+    open_root,
+    pack,
+    read_regular,
+)
 
 EXIT_PASSED = 0
 EXIT_GATE_FAILED = 1
@@ -45,7 +55,7 @@ _ACCESS_HINT = (
 
 POLICY_FILE = Path(".martian") / "scan.yml"
 MAX_POLICY_BYTES = 64 * 1024
-_SHA = re.compile(r"^[0-9a-f]{7,64}$")
+_SHA = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _REF = re.compile(r"^[\x20-\x7e]{1,255}$")
 
 __all__ = [
@@ -118,11 +128,18 @@ def _source() -> Literal["ci", "cli"]:
     return "ci" if os.environ.get("CI", "").lower() in ("1", "true") or os.environ.get("GITHUB_ACTIONS") else "cli"
 
 
-def _write(path: Path, data: bytes) -> None:
+def write_export(path: Path, data: bytes) -> None:
+    """Atomically write an output through a private temporary sibling."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    partial = path.with_name(path.name + ".partial")
-    partial.write_bytes(data)
-    partial.replace(path)
+    partial: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".martian-scan-", delete=False) as handle:
+            partial = Path(handle.name)
+            handle.write(data)
+        partial.replace(path)
+    finally:
+        if partial is not None:
+            partial.unlink(missing_ok=True)
 
 
 def _print_selection(echo: Echo, options: ScanOptions, selection: Selection, packed: Packed) -> None:
@@ -135,7 +152,7 @@ def _print_selection(echo: Echo, options: ScanOptions, selection: Selection, pac
     echo(f"Content digest: {packed.content_digest}")
     for skipped in selection.skipped:
         reason = "a symbolic link inside the folder" if skipped.reason == "symlink" else "not a regular file"
-        echo(f"Not sent: {skipped.path} ({reason})")
+        echo(f"Not sent: {_line(skipped.path)} ({reason})")
 
 
 def _location(finding: Finding) -> str:
@@ -192,16 +209,17 @@ def _read_policy(options: ScanOptions) -> tuple[str, Path | None]:
     """The policy file's text and where it was read; ``("", None)`` when the folder has none."""
     path = options.policy_path or options.folder / POLICY_FILE
     try:
-        mode = path.lstat().st_mode
+        directory = options.policy_path.parent if options.policy_path is not None else options.folder
+        root = directory.resolve(strict=True)
+        relative = path.name if options.policy_path is not None else POLICY_FILE.as_posix()
+        with open_root(root) as descriptor:
+            data = read_regular(descriptor, relative, limit=MAX_POLICY_BYTES + 1)
     except FileNotFoundError:
         if options.policy_path is not None:
             raise SelectionError(f"the policy file {path} does not exist") from None
         return "", None
-    except OSError:
+    except (OSError, RuntimeError):
         raise SelectionError(f"cannot read the policy file {path}") from None
-    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-        raise SelectionError(f"the policy file {path} is not a regular file (a symbolic link is not followed)")
-    data = path.read_bytes()
     if len(data) > MAX_POLICY_BYTES:
         raise SelectionError(f"the policy file {path} is larger than {MAX_POLICY_BYTES // 1024} KiB")
     try:
@@ -242,9 +260,10 @@ def _paths(policy: Policy) -> tuple[str, ...]:
 
 def _git(root: Path, *args: str, raw: bool = False) -> str | None:
     """A Git command in ``root`` with no program of the folder's own configuration; its output, or None."""
+    git = ["git", "--no-replace-objects", "--literal-pathspecs", "-c", "core.fsmonitor=false", "-C", str(root)]
     try:
         done = subprocess.run(
-            ["git", "-c", "core.fsmonitor=false", "-C", str(root), *args],
+            [*git, *args],
             capture_output=True,
             timeout=60,
             check=False,
@@ -269,30 +288,33 @@ def _github_default_branch() -> str | None:
     return branch if isinstance(branch, str) else None
 
 
-def _commit(selection: Selection, options: ScanOptions) -> tuple[dict[str, str] | None, str]:
-    """The manifest's ``git``: the commit the sent files are of, stated only when every sent file is that
-    commit's (tracked and unchanged), and why when it is not stated."""
+def _commit(selection: Selection, packed: Packed, options: ScanOptions) -> tuple[dict[str, str] | None, str]:
+    """Attribute the archive only when every packed file matches a regular blob in HEAD."""
     if not selection.git:
         return None, "not a Git work tree"
+    if packed.git_oids.keys() != set(selection.files):
+        return None, "the archive does not have a Git blob identity for every file"
     sha = _git(selection.root, "rev-parse", "HEAD")
     if not sha or not _SHA.fullmatch(sha):
         return None, "the work tree has no commit"
-    prefix = _git(selection.root, "rev-parse", "--show-prefix")
-    status = _git(selection.root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".", raw=True)
-    if prefix is None or status is None:
-        return None, "git status could not compare the files with the commit"
-    changed: set[str] = set()
-    entries = iter(status.split("\0"))
-    for entry in entries:
-        if len(entry) < 4:
-            continue
-        changed.add(entry[3:])
-        if entry[0] in "RC":
-            changed.add(next(entries, ""))
-    sent = {prefix + path for path in selection.files}
-    differ = sorted(changed & sent)
+    prefix = _git(selection.root, "rev-parse", "--show-prefix", raw=True)
+    if prefix is None:
+        return None, "Git could not locate this folder in the work tree"
+    prefix = prefix.removesuffix("\n")
+    narrowed = ["--", prefix] if prefix else []
+    tree = _git(selection.root, "ls-tree", "-rz", "--full-tree", sha, *narrowed, raw=True)
+    if tree is None:
+        return None, "Git could not read the commit's tree"
+    regular = {}
+    for entry in tree.split("\0"):
+        metadata, _, path = entry.partition("\t")
+        fields = metadata.split(" ")
+        if len(fields) == 3 and fields[0] in ("100644", "100755") and fields[1] == "blob":
+            regular[path] = fields[2]
+    algorithm = 0 if len(sha) == 40 else 1
+    differ = sum(regular.get(prefix + path) != oids[algorithm] for path, oids in packed.git_oids.items())
     if differ:
-        return None, f"{len(differ)} of the files sent differ from commit {sha[:12]} or are not committed"
+        return None, f"{differ} of the files sent differ from commit {sha[:12]} or are not committed"
     found: dict[str, str] = {"sha": sha}
     ref = None
     if os.environ.get("GITHUB_ACTIONS") and os.environ.get("GITHUB_SHA", "").lower() == sha:
@@ -358,10 +380,10 @@ def scan(
     outcome = ScanOutcome(EXIT_ERROR)
 
     def fail(error: object, *, hint: str | None = None) -> ScanOutcome:
-        echo(f"Scan failed: {error}", err=True)
+        outcome.exit_code, outcome.error = EXIT_ERROR, _line(error, 500)
+        echo(f"Scan failed: {outcome.error}", err=True)
         if hint:
             echo(hint, err=True)
-        outcome.exit_code, outcome.error = EXIT_ERROR, _line(error, 500)
         return outcome
 
     if options.kind not in SUBJECT_KINDS:
@@ -410,7 +432,7 @@ def scan(
             echo(f"Left out by the policy file's include: {len(selection.left_out)} file(s).")
         if options.dry_run:
             for path in selection.files:
-                echo(f"  {path}")
+                echo(f"  {_line(path)}")
             if policy is None and where is not None:
                 echo(f"Not applied: {where} (set MARTIAN_API_URL and MARTIAN_API_TOKEN to have the server read it).")
             echo("Dry run: nothing was uploaded.")
@@ -427,7 +449,7 @@ def scan(
             "source": _source(),
             "options": {"model_analysis": options.model_analysis},
         }
-        git, why = _commit(selection, options)
+        git, why = _commit(selection, packed, options)
         if git is not None:
             manifest["git"] = git
             branch = git.get("ref", "no ref")
@@ -497,7 +519,7 @@ def scan(
             status = EXIT_ERROR
             continue
         try:
-            _write(target, data)
+            write_export(target, data)
         except OSError as error:
             echo(f"Not written: {target} ({type(error).__name__}).", err=True)
             status = EXIT_ERROR
