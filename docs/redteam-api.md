@@ -47,7 +47,7 @@ With `target_id`, the run file must reach the target at the target's own address
 
 Every run the launcher starts keeps, in its provenance under `launch`, the run file as it was sent (a relative `file` made absolute) and its `target_id`. Neither holds a key. A resume reads them, so it needs nothing else: as `martian redteam run FILE --resume RUN_ID` does, each finished attempt whose fingerprint is unchanged is kept without calling a model or the target, the rest run again, and the earlier session's cumulative recorded spend still counts against the budget. A run that is still `running` in another session, or that completed, is answered `409`; so is a run the launcher did not start, such as one `martian redteam run` kept, whose run file it does not have. If `martian ui` stopped while a run was running, `stop` records `cancelled` and preserves the warning about incomplete spend. A spend-capped resume whose earlier accounting cannot be verified answers `409` with [unverifiable usage](redteam-run-file.md#budget) and preserves the saved run and its evidence. A re-judged run also answers `409`. Resume with the original execution run ID.
 
-The launcher claims the saved checkpoint before model work starts. A concurrent resume of that checkpoint answers `409`.
+The launcher and CLI hold one session per stored run until work ends. A new resume or a stop request from another process answers `409` while that session is active.
 
 ## Changing the contract
 

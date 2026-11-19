@@ -370,23 +370,21 @@ def _run_version_2(
         except ImportError:
             console.print("Not kept in the local store: install martian-sdk[evals] for that.")
     earlier = None
-    if resume is not None:
-        if keeper is None:
-            _stop("--resume reads the run from the local store: drop --no-store, and install martian-sdk[evals].")
-        earlier = asyncio.run(keeper.get("default", resume))
-        if earlier is None:
-            keeper.close()
-            _stop(f"No red team run {resume} is in the local store.")
-
-    canary = run_canary(earlier)
-    run_id = earlier.id if earlier is not None else f"redteam-{uuid4().hex[:12]}"
+    if resume is not None and keeper is None:
+        _stop("--resume reads the run from the local store: drop --no-store, and install martian-sdk[evals].")
+    run_id = resume if resume is not None else f"redteam-{uuid4().hex[:12]}"
     admitted: Any = None
 
     async def go() -> Any:
-        nonlocal admitted
-        if earlier is not None:
-            Ledger(run_file.budget).restore(earlier)
+        nonlocal admitted, earlier
         async with AsyncExitStack() as stack:
+            exclusive = stack.enter_context(keeper.run_session("default", run_id)) if keeper is not None else False
+            if resume is not None:
+                earlier = await keeper.get("default", run_id)
+                if earlier is None:
+                    _stop(f"No red team run {resume} is in the local store.")
+                Ledger(run_file.budget).restore(earlier)
+            canary = run_canary(earlier)
             service, provenance = build_service(run_file, stack)
             planted = planted_run_file(run_file, canary)
             target = build_target(planted.target, base=config_path.resolve().parent)
@@ -414,6 +412,7 @@ def _run_version_2(
                 provenance=provenance,
                 store=keeper,
                 resume=earlier,
+                recover_interrupted=exclusive,
                 canary=canary,
                 run_id=run_id,
                 world=admitted.world() if admitted is not None else None,

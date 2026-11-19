@@ -279,6 +279,7 @@ async def execute(
     principal: Any = None,
     include_content: bool = False,
     resume: RedteamRun | None = None,
+    recover_interrupted: bool = False,
     canary: str | None = None,
     world: Any = None,
 ) -> RedteamRun:
@@ -308,9 +309,9 @@ async def execute(
     )
     if store is not None and resume is not None:
         if principal is None:
-            await store.claim_resume(resume)
+            await store.claim_resume(resume, recover_interrupted=recover_interrupted)
         else:
-            await store.claim_resume(resume, principal=principal)
+            await store.claim_resume(resume, principal=principal, recover_interrupted=recover_interrupted)
     return await engine.run()
 
 

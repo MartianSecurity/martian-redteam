@@ -329,9 +329,10 @@ it can start.
 An attempt the budget stopped before it was decided is reported `stopped`. The run's budget stats
 and [reports](redteam-reports.md#what-attacked) keep recorded spend and missing usage separately.
 Resume restores cumulative spend, including for failed and stopped attempts that will be retried.
-The CLI and local API mark the saved checkpoint as running before dispatch. Only one resume can
-claim that checkpoint. A checkpoint left running after process interruption may omit calls. A
-spend-capped resume is refused before target or model setup when historical usage cannot be verified, including older
+The CLI and local API hold an exclusive session for each stored run and mark a resumed checkpoint
+as running before dispatch. The session releases when its process exits. A checkpoint left
+running after interruption may omit calls. A spend-capped resume is refused before target or
+model setup when historical usage cannot be verified, including older
 run records with model calls and no usage completeness data. The saved run is preserved. A
 re-judged record has a separate ledger. Use the original execution run ID to resume.
 

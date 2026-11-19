@@ -191,6 +191,14 @@ class SqlRecordStore:
     def close(self) -> None:
         self._engine.dispose()
 
+    @property
+    def local_database_path(self) -> Path | None:
+        """The file shared by local processes, if this store has one."""
+        database = self._engine.url.database
+        if self._postgres or not database or database == ":memory:":
+            return None
+        return Path(database).resolve()
+
     # --- plumbing ----------------------------------------------------------------------------
 
     async def _run(self, principal: Principal, work: Callable[[Connection, str], T]) -> T:

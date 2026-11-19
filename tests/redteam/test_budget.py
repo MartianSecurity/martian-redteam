@@ -372,6 +372,31 @@ async def test_a_resume_has_one_durable_claim_before_the_engine_runs(monkeypatch
         second.close()
 
 
+async def test_a_running_checkpoint_can_only_be_recovered_with_the_local_session(tmp_path):
+    first, second = RedteamStore.local(tmp_path), RedteamStore.local(tmp_path)
+    try:
+        running = RedteamRun(id="fixture-running", catalog_version="fixture", state="running")
+        await first.save(running)
+        with pytest.raises(ResumeError, match="exclusive local session"):
+            await second.claim_resume(running)
+
+        with first.run_session(running.project_id, running.id):
+            launcher = LocalLauncher(second.records)
+            with pytest.raises(HTTPException, match="active session") as refused:
+                await launcher.resume(SINGLE_USER, running.project_id, running.id)
+            assert refused.value.status_code == 409
+            with second.run_session(running.project_id, "independent-run") as independent:
+                assert independent
+
+        with second.run_session(running.project_id, running.id) as recovery:
+            assert recovery
+            await second.claim_resume(running, recover_interrupted=recovery)
+        assert await first.get(running.project_id, running.id) == running
+    finally:
+        first.close()
+        second.close()
+
+
 def test_unverifiable_budget_fails_the_gate_and_ci_reports_even_with_a_decided_attempt():
     ledger = Ledger(Budget(cost_usd=0.01))
     ledger.reserve("judge", PROBE.id)
