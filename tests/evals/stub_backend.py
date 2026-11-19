@@ -1,8 +1,4 @@
-"""A loopback stand-in for the two Backend routes the kit uses. Test infrastructure only.
-
-With ``scanner`` set (a ``tests.scan.fake_backend.FakeScanner``), it serves the scan routes too and
-records a session's ``scan`` test as the backend does: by the stored gate evaluation's verdict, for a
-scan of the session's commit, or failed with the client's reason."""
+"""A loopback stand-in for the two Backend routes the kit uses. Test infrastructure only."""
 
 import json
 import threading
@@ -29,7 +25,6 @@ class StubBackend:
         self.session_statuses = []
         self.redteam_requests = []
         self.redteam_score = 1
-        self.scanner = None
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -49,19 +44,8 @@ class StubBackend:
             def _auth(self):
                 return self.headers.get("Authorization") == "Bearer " + owner.token
 
-            def _scanner(self, method, body):
-                status, headers, payload = owner.scanner.handle(method, self.path, dict(self.headers), body)
-                self.send_response(status)
-                for name, value in headers.items():
-                    self.send_header(name, value)
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
-
             def do_GET(self):
                 owner.requests.append(("GET", self.path, dict(self.headers), None))
-                if owner.scanner is not None and self.path.startswith("/v1/scanner/"):
-                    return self._scanner("GET", b"")
                 if not self._auth():
                     return self._send(401, {"detail": "CI token is not active"})
                 if self.path != "/v1/evals/ci/datasets/support":
@@ -90,15 +74,6 @@ class StubBackend:
                         if gate is None:
                             return self._send(422, {"detail": "unknown run"})
                         records.append({"name": test["name"], "kind": "dataset", "passed": gate == "passed"})
-                    elif test["kind"] == "scan":
-                        report = test["scan"]
-                        gate = next((g for g in owner.scanner.gates if g["id"] == report.get("gate_id")), None)
-                        if report.get("gate_id") is not None and (
-                            gate is None or (gate["scan"]["git"] or {}).get("sha") != body["provenance"]["git_sha"]
-                        ):
-                            return self._send(422, {"detail": "a gate evaluation of another commit"})
-                        ok = gate is not None and gate["verdict"] == "passed"
-                        records.append({"name": test["name"], "kind": "scan", "passed": ok})
                     elif test["kind"] == "redteam":
                         report = test["redteam"]
                         complete = all(r["value"] is not None and not r["error"] for r in report["rows"])
@@ -142,11 +117,7 @@ class StubBackend:
                 )
 
             def do_POST(self):
-                raw = self.rfile.read(int(self.headers["Content-Length"]))
-                if owner.scanner is not None and self.path.startswith("/v1/scanner/"):
-                    owner.requests.append(("POST", self.path, dict(self.headers), None))
-                    return self._scanner("POST", raw)
-                body = json.loads(raw)
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 owner.requests.append(("POST", self.path, dict(self.headers), body))
                 if not self._auth():
                     return self._send(401, {"detail": "CI token is not active"})

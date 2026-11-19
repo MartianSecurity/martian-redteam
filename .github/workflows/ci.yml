@@ -324,58 +324,6 @@ jobs:
           fi
           jq -e '.failed == 2 and .errors == 0' results/evals-failing/summary.json
 
-      # The scan action against a stand-in for the backend's scan routes on
-      # loopback (tests/scan/fake_backend.py), which reports one seeded finding
-      # on every SKILL.md. The token is the stand-in's test value, not a secret.
-      - name: Start the stand-in scan backend
-        id: scan-backend
-        run: |
-          set -euo pipefail
-          python3 tests/scan/fake_backend.py --port-file "${RUNNER_TEMP}/scan-port" &
-          for _ in $(seq 50); do
-            [ -s "${RUNNER_TEMP}/scan-port" ] && break
-            sleep 0.2
-          done
-          echo "url=http://127.0.0.1:$(cat "${RUNNER_TEMP}/scan-port")" >> "${GITHUB_OUTPUT}"
-
-      - name: Scan action on the fixture without its skill
-        uses: ./.github/actions/scan
-        env:
-          MARTIAN_API_URL: ${{ steps.scan-backend.outputs.url }}
-          MARTIAN_API_TOKEN: mce_test_scan_key_0123456789
-        with:
-          path: examples/scan/fixture
-          include: |
-            AGENTS.md
-            .mcp.json
-          output: results/scan-clean
-
-      - name: Scan action on the fixture with its seeded finding
-        id: seeded-scan
-        continue-on-error: true
-        uses: ./.github/actions/scan
-        env:
-          MARTIAN_API_URL: ${{ steps.scan-backend.outputs.url }}
-          MARTIAN_API_TOKEN: mce_test_scan_key_0123456789
-        with:
-          path: examples/scan/fixture
-          output: results/scan-seeded
-
-      - name: Require the seeded finding to fail the gate with SARIF written
-        env:
-          SEEDED_OUTCOME: ${{ steps.seeded-scan.outcome }}
-          SEEDED_EXIT: ${{ steps.seeded-scan.outputs.exit-code }}
-          SEEDED_SARIF: ${{ steps.seeded-scan.outputs.sarif }}
-        run: |
-          set -euo pipefail
-          if [ "$SEEDED_OUTCOME" != "failure" ] || [ "$SEEDED_EXIT" != "1" ]; then
-            echo "the seeded finding did not fail the scan gate (outcome ${SEEDED_OUTCOME}, exit ${SEEDED_EXIT})" >&2
-            exit 1
-          fi
-          jq -e '.version == "2.1.0" and (.runs[0].results | length) == 1' "$SEEDED_SARIF"
-          jq -e '.runs[0].results[0].partialFingerprints["martianScannerFinding/v1"] | length == 64' "$SEEDED_SARIF"
-          jq -e '.runs[0].results | length == 0' results/scan-clean/scan.sarif
-
   ci:
     name: CI
     if: always()

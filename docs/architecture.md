@@ -76,7 +76,6 @@ in-memory prediction data and local MLflow traces remain private customer data.
 | `src/martian/config.py` | Shared origin-bound connection, CI attribution |
 | `src/martian/redteam/client.py` | Typed public Backend operations and safe recovery |
 | `src/martian/ci.py` | One pytest execution and one persisted session |
-| `src/martian/scan/` | `martian scan`: file selection and the ZIP (`files.py`), the client of the backend's `/v1/scanner` routes (`client.py`); no rules, see [scanning agent files](scan.md) |
 | `src/martian/evals/` | Dataset/MLflow adapters, gates, Backend uploads |
 | `src/martian/evals/model/` | The shared eval data model; see [eval model](eval-model.md) |
 | `src/martian/evals/server/`, `src/martian/evals/store/` | The evals core and its store interface; see [evals core](evals-core.md) |

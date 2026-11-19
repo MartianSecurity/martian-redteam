@@ -18,20 +18,10 @@ from martian._version import __version__
 class TestResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str
-    kind: Literal["dataset", "checks", "redteam", "scan"]
+    kind: Literal["dataset", "checks", "redteam"]
     passed: bool
-    provenance: Literal["client_executed_server_scored", "client_executed_client_scored", "server_evaluated_gate"]
+    provenance: Literal["client_executed_server_scored", "client_executed_client_scored"]
     run_id: str | None = None
-
-
-def provenance_of(
-    kind: str,
-) -> Literal["client_executed_server_scored", "client_executed_client_scored", "server_evaluated_gate"]:
-    """Who decided a test of ``kind``: the server scored a dataset run, the server evaluated a scan's gate,
-    and the runner judged checks and red team probes."""
-    if kind == "dataset":
-        return "client_executed_server_scored"
-    return "server_evaluated_gate" if kind == "scan" else "client_executed_client_scored"
 
 
 class SessionResult(BaseModel):

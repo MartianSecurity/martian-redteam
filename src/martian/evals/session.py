@@ -17,7 +17,7 @@ from martian.evals.client import Backend, BackendError
 from martian.evals.config import KitConfig, current_config
 from martian.evals.receipt import session_receipt
 from martian.evals.state import STATE, GateRecord
-from martian.result import SessionResult, TestResult, provenance_of
+from martian.result import SessionResult, TestResult
 
 MAX_TESTS = 100
 MAX_SESSION_ROWS = 1000
@@ -96,7 +96,7 @@ def finish(session: pytest.Session, exitstatus: int) -> None:
         return
     records = list(STATE.records)
     problems: list[str] = []
-    if config.getoption("--martian-require-evals") and not any(r.kind not in ("redteam", "scan") for r in records):
+    if config.getoption("--martian-require-evals") and not any(r.kind != "redteam" for r in records):
         records.append(
             GateRecord(test="required evals gate", kind="checks", failure="the required evals gate did not run")
         )
@@ -106,17 +106,12 @@ def finish(session: pytest.Session, exitstatus: int) -> None:
                 test="required redteam gate", kind="checks", failure="the required assert_redteam gate did not run"
             )
         )
-    if config.getoption("--martian-require-scan") and not any(r.kind == "scan" for r in records):
-        reason = "the required scan did not run"
-        records.append(GateRecord(test="required scan", kind="scan", scan={"error": reason}, failure=reason))
     if STATE.skipped:
         problems.append(f"{STATE.skipped} test(s) skipped: a skipped gate is a failed gate")
     if STATE.worker_errors:
         problems.append(f"{STATE.worker_errors} xdist worker(s) ended with an error")
     if not records:
-        problems.append(
-            "no assert_gate, assert_checks or assert_redteam call ran, and no scan (no test reached its gate)"
-        )
+        problems.append("no assert_gate, assert_checks or assert_redteam call ran (no test reached its gate)")
     if problems or exitstatus != 0:
         records.append(
             GateRecord(
@@ -130,7 +125,7 @@ def finish(session: pytest.Session, exitstatus: int) -> None:
     keys: set[tuple[str, str]] = set()
     for record in records:
         key = (record.test, record.failure)
-        if record.rows is None and record.check_rows is None and record.redteam is None and record.scan is None:
+        if record.rows is None and record.check_rows is None and record.redteam is None:
             if key in keys:
                 continue
             keys.add(key)
@@ -150,7 +145,7 @@ def finish(session: pytest.Session, exitstatus: int) -> None:
             name=r.test,
             kind=r.kind,
             passed=not bool(r.failure),
-            provenance=provenance_of(r.kind),
+            provenance=("client_executed_server_scored" if r.kind == "dataset" else "client_executed_client_scored"),
         )
         for r in records
     ]
@@ -187,8 +182,6 @@ def finish(session: pytest.Session, exitstatus: int) -> None:
                     tests.append(_placeholder(record.test, record.failure or "the dataset run could not be uploaded"))
             elif record.kind == "redteam" and record.redteam is not None:
                 tests.append({"name": record.test, "kind": "redteam", "redteam": record.redteam})
-            elif record.kind == "scan" and record.scan is not None:
-                tests.append({"name": record.test, "kind": "scan", "scan": record.scan})
             elif record.check_rows is not None:
                 tests.append({"name": record.test, "kind": "checks", "rows": record.check_rows})
             else:
@@ -214,7 +207,9 @@ def finish(session: pytest.Session, exitstatus: int) -> None:
                         kind=test.kind,
                         passed=test.passed,
                         run_id=run_ids.get(test.name),
-                        provenance=provenance_of(test.kind),
+                        provenance="client_executed_server_scored"
+                        if test.kind == "dataset"
+                        else "client_executed_client_scored",
                     )
                     for test in acknowledged.tests
                 ]

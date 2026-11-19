@@ -33,7 +33,6 @@ Hosted features also need the SDK APIs enabled for the organisation.
 6. [Catalog](catalog.md) — catalogue 1.0: each vulnerability's objective, forms and what each proves, default severity, framework tags, source and licence; the version rule; attack IDs, frameworks, custom criteria
 7. [Configuration](configuration.md) — env vars, YAML schema, CLI (`validate`, `-c`/`-a`/`-o`), Markdown reports
 8. [Gate and CI](gate-and-ci.md) — fail-closed local gate (not `deepeval gate`), this repo’s split CI, customer reusable workflow / composite action, the evals pull-request action and its comment with red team results, WAF
-   - [Scanning agent files](scan.md) — `martian scan`: which files it sends, the upload and polling, the exit codes on the server's gate, and the scan action with SARIF in code scanning; needs a Scanner-enabled Cloud or Enterprise organisation
 9. [Security and data](security-and-data.md) — origin isolation, what leaves the customer network, and telemetry, which is off
 10. [Development](development.md) — layout, tests, coverage artifacts, Dependabot, the Contributor License Agreement check
 11. [Customer MCP integration](customer-integration.md) — runtime-provided MCP connections, tool binding, bounded local traces and optional outbound runtime metadata. These are integration extras, not a product line

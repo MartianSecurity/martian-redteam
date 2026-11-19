@@ -32,70 +32,9 @@ _RUN_LOCK = threading.Lock()
 class CiSuite:
     evals_paths: tuple[Path, ...] = ()
     redteam_config: Path | None = None
-    scan: Path | None = None
-    """A repository folder to scan (``martian scan``, with its ``.martian/scan.yml``); a required test."""
     output_dir: Path = Path("results")
     pytest_args: tuple[str, ...] = ()
     require_export: bool = False
-
-
-class _ScanItem(pytest.Item):
-    """``martian scan`` of the suite's folder as one test of the session (MartianSecurity/martian-notes#473).
-    The scan must be of the session's commit; the test names the gate evaluation the server stored, whose
-    verdict the server takes, or says why the scan has none."""
-
-    def __init__(self, *, suite: CiSuite, connection: MartianConfig, ci: CiContext, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self.suite = suite
-        self.connection = connection
-        self.ci = ci
-
-    def runtest(self) -> None:
-        from martian.scan import ScanOptions, scan
-
-        assert self.suite.scan is not None
-        destination = self.suite.output_dir / "scan"
-        lines: list[str] = []
-
-        def echo(text: str = "", err: bool = False) -> None:
-            lines.append(text)
-
-        try:
-            outcome = scan(
-                ScanOptions(
-                    folder=self.suite.scan,
-                    sarif_path=destination / "scan.sarif",
-                    json_path=destination / "scan.json",
-                    expect_sha=self.ci.git_sha,
-                ),
-                echo=echo,
-                config=self.connection,
-            )
-        except Exception as exc:  # a defect, not a verdict: the test fails with the error's type only
-            reason = f"the scan did not run: {type(exc).__name__}"
-            STATE.record(GateRecord(test=self.nodeid, kind="scan", scan={"error": reason}, failure=reason))
-            raise GateFailure(reason) from None
-        finally:
-            destination.mkdir(mode=0o700, parents=True, exist_ok=True)
-            (destination / "scan.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
-        report: dict[str, Any] = {"scan_id": str(outcome.scan_id)} if outcome.scan_id else {}
-        failure = ""
-        if outcome.gate_id is not None:
-            report["gate_id"] = str(outcome.gate_id)
-            if outcome.exit_code:
-                failure = f"scan gate exit {outcome.exit_code}: " + (outcome.reasons[0] if outcome.reasons else "")
-        else:
-            failure = "the scan was not judged: " + (outcome.error or "no verdict")
-            report["error"] = failure[:2000]
-        STATE.record(GateRecord(test=self.nodeid, kind="scan", scan=report, failure=failure))
-        if failure:
-            raise GateFailure(failure)
-
-    def repr_failure(self, excinfo: Any, style: Any = None) -> str:
-        return str(excinfo.value)
-
-    def reportinfo(self) -> tuple[Path, None, str]:
-        return self.path, None, "Martian scan"
 
 
 class _RedteamItem(pytest.Item):
@@ -173,12 +112,6 @@ class _SuitePlugin:
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_collection_modifyitems(self, session: pytest.Session, items: list[pytest.Item]) -> None:
-        if self.suite.scan is not None:
-            items.append(
-                _ScanItem.from_parent(
-                    session, name="martian:scan", suite=self.suite, connection=self.connection, ci=self.ci
-                )
-            )
         if self.suite.redteam_config is not None:
             items.append(
                 _RedteamItem.from_parent(
@@ -225,10 +158,8 @@ def run(
             raise ConfigError("required CI suites cannot use MARTIAN_EVALS_ALLOW_PARTIAL")
         if configured.offline:
             raise ConfigError("a persisted CI gate requires Backend credentials; offline previews cannot pass CI")
-        if not suite.evals_paths and suite.redteam_config is None and suite.scan is None:
-            raise ConfigError("select evals, redteam, a scan, or a combination")
-        if suite.scan is not None and not suite.scan.is_dir():
-            raise ConfigError("the scan folder does not exist")
+        if not suite.evals_paths and suite.redteam_config is None:
+            raise ConfigError("select evals, redteam, or both")
         if any(not p.exists() for p in suite.evals_paths):
             raise ConfigError("an evals path does not exist")
         if any(
@@ -245,8 +176,6 @@ def run(
             required.append("--martian-require-export")
         if suite.redteam_config is not None:
             required.append("--martian-require-redteam")
-        if suite.scan is not None:
-            required.append("--martian-require-scan")
         code = pytest.main(
             [
                 "-p",

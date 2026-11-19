@@ -6,16 +6,15 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from martian.evals.types import EvaluationResultLike, RedteamReport
-from martian.result import SessionResult, TestResult, provenance_of
+from martian.result import SessionResult, TestResult
 
 
 @dataclass
 class GateRecord:
-    """One regression test's gate: a pinned-dataset gate (`dataset`), scorer checks (`checks`), red team
-    probes (`redteam`) or a Scanner gate the server evaluated (`scan`)."""
+    """One regression test's gate: a pinned-dataset gate (`dataset`) or scorer checks (`checks`)."""
 
     test: str
-    kind: Literal["dataset", "checks", "redteam", "scan"]
+    kind: Literal["dataset", "checks", "redteam"]
     dataset_name: str = ""
     dataset_id: str = ""
     items_digest: str = ""
@@ -27,8 +26,6 @@ class GateRecord:
     # Checks: rows of the runner's own scorer results.
     check_rows: list[dict[str, Any]] | None = None
     redteam: RedteamReport | None = None
-    # Scan: the gate evaluation the server stored and its scan, or the scan and why it has no verdict.
-    scan: dict[str, Any] | None = None
     summary: dict[str, Any] = field(default_factory=dict)
     failure: str = ""
 
@@ -88,7 +85,7 @@ class SessionState:
                 name=r.test,
                 kind=r.kind,
                 passed=not bool(r.failure),
-                provenance=provenance_of(r.kind),
+                provenance="client_executed_server_scored" if r.kind == "dataset" else "client_executed_client_scored",
             )
             for r in self.records
         ]
