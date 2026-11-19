@@ -55,7 +55,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -67,6 +70,7 @@ from martian.evals.judge_settings import JudgeSettings
 from martian.evals.local_targets import LocalTargets
 from martian.evals.model import Run, RunLimits, RunState, ScoringJob, Suite, Target
 from martian.evals.records import RecordStore
+from martian.evals.records.lease import WorkLeaseLost, current_work_lease
 from martian.evals.records.queue import RECORDING, Claim, SqlWorkQueue
 from martian.evals.server.dependencies import (
     EntitlementsDep,
@@ -139,32 +143,57 @@ class RunHold:
     one with :meth:`take`, before the run is recorded, so no process ever finds the run running and
     not held."""
 
-    def __init__(self, queue: SqlWorkQueue, claim: Claim, lease_seconds: float) -> None:
+    def __init__(self, queue: SqlWorkQueue, claim: Claim, lease_seconds: float, deadline: float) -> None:
         self._queue = queue
         self._claim = claim
         self._lease = lease_seconds
         self._stopped = threading.Event()
-        self._renewing = threading.Thread(target=self._renew, name="martian-run-hold", daemon=True)
+        self.lost = threading.Event()
+        self._renewing = threading.Thread(target=self._renew, args=(deadline,), name="martian-run-hold", daemon=True)
         self._renewing.start()
 
     @classmethod
     async def take(cls, home: Path, run_id: str, lease_seconds: float | None = None) -> RunHold:
         queue, lease = open_queue(home), lease_seconds or LEASE_SECONDS
         work = _run_work(run_id)
+        started = time.monotonic()
         try:
             claim = await queue.hold(SINGLE_USER, DEFAULT_PROJECT, entry_id(work), RECORDING, dump_work(work), lease)
         except BaseException:
             queue.close()
             raise
-        return cls(queue, claim, lease)
+        return cls(queue, claim, lease, started + lease)
 
-    def _renew(self) -> None:
-        while not self._stopped.wait(self._lease / 3):
+    def _renew(self, deadline: float) -> None:
+        while not self._stopped.wait(min(self._lease / 3, max(0, deadline - time.monotonic()))):
+            started = time.monotonic()
+            if started >= deadline:
+                break
             try:
                 if not asyncio.run(self._queue.renew(self._claim, self._lease)):
-                    return  # its lease ran out, and a worker finished the run as interrupted
+                    break
             except Exception:  # noqa: BLE001 - the database is busy; try again at the next renewal
                 log.exception("Could not renew the hold on run %s", self._claim.id)
+                continue
+            if time.monotonic() >= deadline:
+                break
+            deadline = started + self._lease
+        if not self._stopped.is_set():
+            self.lost.set()
+
+    @contextmanager
+    def guard(self) -> Iterator[None]:
+        """Bind recording transactions to this claim and signal a rejected write."""
+        if self.lost.is_set():
+            raise WorkLeaseLost()
+        context = current_work_lease.set(self._claim.ownership())
+        try:
+            yield
+        except WorkLeaseLost:
+            self.lost.set()
+            raise
+        finally:
+            current_work_lease.reset(context)
 
     def release(self) -> None:
         """Release the run and remove its entry from the queue. Releasing it again does nothing."""

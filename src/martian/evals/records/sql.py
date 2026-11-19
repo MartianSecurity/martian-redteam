@@ -79,7 +79,7 @@ from martian.evals.records import (
 )
 from martian.evals.records.admission import LAUNCHED, RunAdmission
 from martian.evals.records.events import Event, EventBus, InProcessEvents, space_of
-from martian.evals.records.lease import current_work_lease, lock_current_lease
+from martian.evals.records.lease import WorkLeaseLost, current_work_lease, lock_current_lease
 from martian.evals.records.tables import (
     REDTEAM_TABLES,
     blind_queues,
@@ -215,7 +215,7 @@ class SqlRecordStore:
                     if self._postgres:
                         connection.execute(text("SELECT set_config('martian.space', :space, true)"), {"space": space})
                     if lease is not None and (space != lease.space or not lock_current_lease(connection, lease, _now)):
-                        raise StoreError("conflict", "The worker no longer holds the current work lease")
+                        raise WorkLeaseLost()
                     return work(connection, space)
             except (DataError, IntegrityError) as error:
                 refused = database_refusal(operation, error)

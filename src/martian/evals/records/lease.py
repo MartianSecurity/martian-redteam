@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from sqlalchemy import Connection, select
 
 from martian.evals.records.tables import work_queue
+from martian.evals.store import StoreError
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,11 @@ class WorkLease:
 
 
 current_work_lease: ContextVar[WorkLease | None] = ContextVar("current_work_lease", default=None)
+
+
+class WorkLeaseLost(StoreError):
+    def __init__(self) -> None:
+        super().__init__("conflict", "The worker no longer holds the current work lease")
 
 
 def lock_current_lease(connection: Connection, lease: WorkLease, now: Callable[[], datetime]) -> bool:

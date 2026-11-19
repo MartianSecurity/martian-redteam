@@ -30,6 +30,8 @@ from martian.evals.local_runs import INTERRUPTED, LEASE_SECONDS, LocalWorker, he
 from martian.evals.local_targets import LocalTargets
 from martian.evals.model import Case, Run, Suite, Target, digest
 from martian.evals.records import queue as queue_module
+from martian.evals.records import sql as record_sql
+from martian.evals.records.lease import WorkLeaseLost
 from martian.evals.run_record import RunRecorder
 from martian.evals.server import DEFAULT_PROJECT, SINGLE_USER
 from martian.evals.worker.scorers import builtin_scorer
@@ -650,3 +652,17 @@ def test_martian_evals_run_holds_its_run_while_it_records_it(home):
     queue = open_queue(home)
     assert asyncio.run(queue.pending()) == 0
     queue.close()
+
+
+def test_a_direct_recording_quits_when_its_claim_expires(home, monkeypatch):
+    suite = Suite(id="evals", name="evals", scorers=[builtin_scorer("exact_match")], digest=digest({"suite": 1}))
+    with RunRecorder(home, suite) as recorder:
+        recorder.start(planned=0, total=0, limit=None, reused=[])
+        cancelled = recorder.watch_cancel()
+        later = datetime.now(UTC) + timedelta(minutes=1)
+        monkeypatch.setattr(record_sql, "_now", lambda: later)
+        with pytest.raises(WorkLeaseLost):
+            recorder.graded([])
+        assert cancelled.wait(3)
+        with pytest.raises(WorkLeaseLost):
+            recorder.finish()

@@ -1195,7 +1195,8 @@ app = create_app(store=store, records=records, principal=lambda: SINGLE_USER, wo
   ends `failed` stays failed: nothing retries a target or a judge.
 - **Runs recorded outside the queue.** A process that records a run itself, as `martian evals run`
   does in the local edition, holds the run in the queue with a `recording` claim that it renews
-  (`SqlWorkQueue.hold`). No worker runs one: once its lease runs out, the process recording it is
+  (`SqlWorkQueue.hold`). Losing the claim signals the CLI to stop and blocks further record
+  writes. No worker runs one: once its lease runs out, the process recording it is
   gone, and the worker that claims it finishes the run, `failed`, or `cancelled` when a stop was
   asked, with the `error` "Interrupted: the process working on this run stopped before it
   finished".
