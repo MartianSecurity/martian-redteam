@@ -1421,124 +1421,6 @@ def _announce_ui(url: str, *, host: str, port: int, home: Path) -> None:
     typer.echo(EXPOSURE_WARNING, err=True)
 
 
-@app.command("scan")
-def run_scan_command(
-    folder: Annotated[
-        Path, typer.Argument(file_okay=False, help="The folder to scan. Default: the current folder.")
-    ] = Path("."),
-    include: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--include",
-            "-i",
-            show_default=False,
-            help=(
-                "A path pattern of files to send, relative to the folder; repeat it for more. A pattern without "
-                "a slash matches a name at any depth, a leading / anchors it, ** matches any number of folders, "
-                "a trailing / a whole folder. "
-                "Replaces the default agent paths."
-            ),
-        ),
-    ] = None,
-    kind: Annotated[
-        str,
-        typer.Option(
-            "--kind",
-            help=(
-                "What the folder is: repository, skill, mcp_server, plugin, subagent, harness_config, "
-                "agent_code or registry_entry."
-            ),
-        ),
-    ] = "repository",
-    name: Annotated[
-        str | None,
-        typer.Option(
-            "--name",
-            show_default=False,
-            help="The scan subject's name. Default: GITHUB_REPOSITORY, else the folder's name.",
-        ),
-    ] = None,
-    agent_id: Annotated[
-        str | None, typer.Option("--agent-id", show_default=False, help="Link the subject to a registered agent.")
-    ] = None,
-    model_analysis: Annotated[
-        bool,
-        typer.Option(
-            "--model-analysis/--no-model-analysis",
-            help="Let the scan send file contents to a model, when the organisation's policy allows it.",
-        ),
-    ] = True,
-    timeout: Annotated[
-        float, typer.Option("--timeout", min=1, max=86400, help="Seconds to wait for the scan to end.")
-    ] = 600.0,
-    json_path: Annotated[
-        Path | None, typer.Option("--json", dir_okay=False, show_default=False, help="Write the server's JSON export.")
-    ] = None,
-    sarif_path: Annotated[
-        Path | None,
-        typer.Option("--sarif", dir_okay=False, show_default=False, help="Write the server's SARIF 2.1.0 export."),
-    ] = None,
-    dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="List the files that would be sent and stop; needs no token.")
-    ] = False,
-    policy: Annotated[
-        Path | None,
-        typer.Option(
-            "--policy",
-            dir_okay=False,
-            show_default=False,
-            help="The gate policy file. Default: .martian/scan.yml in the folder, when it exists.",
-        ),
-    ] = None,
-    default_branch: Annotated[
-        str | None,
-        typer.Option(
-            "--default-branch",
-            show_default=False,
-            help="The repository's default branch, for the baseline. Default: GitHub's event, else origin/HEAD.",
-        ),
-    ] = None,
-) -> None:
-    """Scan a folder's agent files (skills, MCP configuration, plugins, sub-agents, hooks, settings,
-    rules files) with the Martian Scanner and exit on the server's gate: 0 passed, 1 failed, 2 no result.
-
-    The scan and the gate run on the server: it needs a Scanner-enabled Martian Cloud or Enterprise
-    organisation and MARTIAN_API_URL and MARTIAN_API_TOKEN, a key with scan:run and scan:read. The server
-    reads the folder's .martian/scan.yml (what to send, the threshold, the baseline, waivers). Inside a Git
-    work tree, files .gitignore ignores are not sent and the commit is sent with the files when they are
-    all committed. A symbolic link out of the folder refuses the scan.
-
-    martian scan --sarif results/scan.sarif   scan the current folder and write SARIF for code scanning
-    """
-    from uuid import UUID
-
-    from martian.scan import ScanOptions, run_scan
-
-    try:
-        agent = UUID(agent_id) if agent_id is not None else None
-    except ValueError:
-        typer.echo("Scan failed: --agent-id must be a UUID.", err=True)
-        raise typer.Exit(code=2) from None
-    code = run_scan(
-        ScanOptions(
-            folder=folder,
-            include=tuple(include or ()),
-            kind=kind,
-            name=name,
-            agent_id=agent,
-            model_analysis=model_analysis,
-            timeout_seconds=timeout,
-            json_path=json_path,
-            sarif_path=sarif_path,
-            dry_run=dry_run,
-            policy_path=policy,
-            default_branch=default_branch,
-        ),
-        echo=typer.echo,
-    )
-    raise typer.Exit(code=code)
-
-
 @app.command("ci")
 def run_ci(
     evals_path: Annotated[
@@ -1547,15 +1429,6 @@ def run_ci(
     redteam_config: Annotated[
         Path | None, typer.Option("--redteam-config", exists=True, dir_okay=False, help="Required redteam YAML suite.")
     ] = None,
-    scan: Annotated[
-        Path | None,
-        typer.Option(
-            "--scan",
-            exists=True,
-            file_okay=False,
-            help="Required scan of this repository folder (martian scan, with its .martian/scan.yml).",
-        ),
-    ] = None,
     output: Annotated[
         Path, typer.Option("--output", "-o", help="Safe reports and one persisted session receipt.")
     ] = Path("results"),
@@ -1563,7 +1436,7 @@ def run_ci(
         bool, typer.Option("--require-export", help="Require configured MLflow exports to finish.")
     ] = False,
 ) -> None:
-    """Run evals, redteam, a scan, or any of them together once in one persisted CI session."""
+    """Run evals, redteam, or both once in one persisted CI session."""
     if importlib.util.find_spec("pytest") is None or importlib.util.find_spec("mlflow") is None:
         typer.echo("CI dependencies are missing; install martian-sdk[evals].", err=True)
         raise typer.Exit(code=2)
@@ -1573,7 +1446,6 @@ def run_ci(
         CiSuite(
             evals_paths=(evals_path,) if evals_path else (),
             redteam_config=redteam_config,
-            scan=scan,
             output_dir=output,
             require_export=require_export,
         )
