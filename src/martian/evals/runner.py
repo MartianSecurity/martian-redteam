@@ -45,12 +45,13 @@ import functools
 import hashlib
 import inspect
 import json
+import math
 import os
 import re
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
@@ -65,10 +66,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationIn
 
 from martian._version import __version__
 from martian.config import ConfigError
-from martian.evals import _custom, _numeric, _policy, _tool_calls
+from martian.evals import _custom, _numeric, _policy, _tool_calls, named_metrics
 from martian.evals._digits import ascii_digits
 from martian.evals._endpoint_errors import names_unknown_model
 from martian.evals._json_schema import check_schema
+from martian.evals._rubric_prompt import JudgePrompt
 from martian.evals.cache import (
     DEFAULT_TTL_SECONDS,
     MAX_TTL_SECONDS,
@@ -77,6 +79,15 @@ from martian.evals.cache import (
     exact_json,
     key_address,
     key_headers,
+)
+from martian.evals.case_gate import (
+    CASE_GATE,
+    CaseChecks,
+    CaseGate,
+    GateNumber,
+    case_check_index,
+    gate_definition,
+    validate_gates,
 )
 from martian.evals.conversations import (
     CONVERSATION_INPUTS,
@@ -92,8 +103,9 @@ from martian.evals.conversations import (
     user,
     user_text,
 )
+from martian.evals.derived_metrics import DerivedMetrics
 from martian.evals.matrix import Combination, MatrixAxis, combinations
-from martian.evals.model import MAX_ATTEMPTS, MAX_TURNS, CheckScope, CombineRule, SimulatedUser, Turn
+from martian.evals.model import MAX_ATTEMPTS, MAX_TURNS, CheckScope, CombineRule, ResponseMode, SimulatedUser, Turn
 from martian.evals.panel import PREFIX as PANEL_PREFIX
 from martian.evals.panel import check_models
 from martian.evals.repeats import combine_attempts, passed_every_attempt, plan, reliability, representative
@@ -109,7 +121,8 @@ GROUNDING_JUDGES = ("groundedness", "context_relevance", "context_sufficiency")
 # LLM judges that read a whole conversation (martian.evals.conversation_judges): they grade
 # conversation cases only, at scope: conversation.
 CONVERSATION_JUDGES = ("task_completion", "policy_adherence", "knowledge_retention")
-JUDGES = CRITERIA_JUDGES + GROUNDING_JUDGES + CONVERSATION_JUDGES
+SCORED_RUBRIC = "scored_rubric"
+JUDGES = CRITERIA_JUDGES + GROUNDING_JUDGES + CONVERSATION_JUDGES + (SCORED_RUBRIC,)
 CRITERIA_KEYS = {
     "rubric": "rubric",
     "guidelines": "guidelines",
@@ -128,11 +141,14 @@ CHECKS = (
     "starts_with",
     "ends_with",
     "similarity",
+    "levenshtein",
     "matches",
     "not_matches",
     "is_json",
+    "is_xml",
     "json_schema",
     "length",
+    "word_count",
     "latency",
     "cost",
     "number_equals",
@@ -159,6 +175,7 @@ TEXT_CHECKS = (
     "starts_with",
     "ends_with",
     "similarity",
+    "levenshtein",
 )
 # Checks that measure the target's call rather than its reply.
 CALL_CHECKS = ("latency", "cost")
@@ -290,8 +307,9 @@ class TargetRef(_Model):
     function: str = "target"
     url: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
-    body: dict[str, Any] | None = None
+    body: dict[str, Any] | list[Any] | None = None
     response_path: str | None = None
+    response_mode: ResponseMode | None = None
     timeout_seconds: float = Field(default=DEFAULT_TARGET_TIMEOUT_SECONDS, ge=1, le=600)
 
     @model_validator(mode="after")
@@ -300,7 +318,7 @@ class TargetRef(_Model):
             raise ValueError("a target needs a file or a url, not both")
         given = self.model_fields_set
         if self.file is not None:
-            extra = sorted(given & {"headers", "body", "response_path"})
+            extra = sorted(given & {"headers", "body", "response_path", "response_mode"})
             if extra:
                 raise ValueError(f"{', '.join(extra)} only applies to a url target")
             return self
@@ -344,6 +362,7 @@ class SimulatorConfig(JudgeConfig):
 class CheckSpec(_Model):
     type: Literal[
         "rubric",
+        "scored_rubric",
         "guidelines",
         "conditions",
         "groundedness",
@@ -360,11 +379,14 @@ class CheckSpec(_Model):
         "starts_with",
         "ends_with",
         "similarity",
+        "levenshtein",
         "matches",
         "not_matches",
         "is_json",
+        "is_xml",
         "json_schema",
         "length",
+        "word_count",
         "latency",
         "cost",
         "number_equals",
@@ -387,6 +409,8 @@ class CheckSpec(_Model):
     # Criteria for an LLM judge, applied to every row that does not carry its own; a
     # policy_adherence judge takes guidelines too.
     rubric: str | None = None
+    judge_prompt: JudgePrompt | None = None
+    score_threshold: GateNumber | None = None
     guidelines: list[str] | None = None
     conditions: list[dict[str, str]] | None = None
     # An LLM judge's panel: the judge models that each grade it, in place of judge.model; the
@@ -397,13 +421,22 @@ class CheckSpec(_Model):
     expectation: str | None = None
     any_of: bool = False
     case_sensitive: bool = False
+    case_mapping: Literal["casefold", "lower"] = "casefold"
     min_similarity: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    max_edits: int = Field(default=5, ge=0, strict=True)
     pattern: str | None = None
     required_keys: list[str] = Field(default_factory=list)
+    required_elements: list[str] = Field(default_factory=list)
+    fragment: bool = False
+    plain_json: bool = False
+    embedded: Literal["strict", "promptfoo"] | None = None
+    negate: bool = False
     # `schema` in the file; a field of that name would hide BaseModel.schema.
     json_schema: dict[str, Any] | None = Field(default=None, alias="schema")
     min_length: int | None = Field(default=None, ge=0)
     max_length: int | None = Field(default=None, ge=0)
+    min_words: int | None = Field(default=None, ge=0, strict=True)
+    max_words: int | None = Field(default=None, ge=0, strict=True)
     max_ms: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     max_usd: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     max_tokens: int | None = Field(default=None, ge=1)
@@ -456,7 +489,13 @@ class CheckSpec(_Model):
         if self.panel is not None:
             if self.type not in JUDGES:
                 raise ValueError(f"a panel names judge models, and a {self.type} check is no LLM judge")
+            if self.type == SCORED_RUBRIC:
+                raise ValueError("a scored_rubric check uses one judge.model")
             check_models(self.panel)
+        if self.type == SCORED_RUBRIC:
+            for key, value in (("rubric", self.rubric), ("expectation", self.expectation)):
+                if value is not None and not value.strip() and (key != "rubric" or self.judge_prompt is None):
+                    raise ValueError(f"a scored_rubric check's {key} must be nonempty")
         if self.type in CONVERSATION_JUDGES and self.scope != "conversation":
             raise ValueError(f"a {self.type} judge reads a whole conversation; give it scope: conversation")
         if self.scope == "conversation" and self.type in JUDGES and self.type not in CONVERSATION_JUDGES:
@@ -486,12 +525,19 @@ class CheckSpec(_Model):
         if self.type == "json_schema":
             if self.json_schema is None:
                 raise ValueError("a json_schema check needs a schema")
+            if self.plain_json and self.embedded is not None:
+                raise ValueError("use either plain_json or embedded")
             check_schema(self.json_schema)
         if self.type == "length":
             if self.min_length is None and self.max_length is None:
                 raise ValueError("a length check needs min_length, max_length or both")
             if self.min_length is not None and self.max_length is not None and self.min_length > self.max_length:
                 raise ValueError("min_length is more than max_length")
+        if self.type == "word_count":
+            if self.min_words is None and self.max_words is None:
+                raise ValueError("a word_count check needs min_words, max_words or both")
+            if self.min_words is not None and self.max_words is not None and self.min_words > self.max_words:
+                raise ValueError("min_words is more than max_words")
         if self.type == "latency" and self.max_ms is None:
             raise ValueError("a latency check needs max_ms")
         if self.type == "cost" and self.max_usd is None and self.max_tokens is None:
@@ -614,6 +660,9 @@ class Suite(_Model):
     # not a security check (martian.evals.repeats).
     repeats: int = Field(default=1, ge=1, le=MAX_ATTEMPTS)
     combine: CombineRule = "all"
+    case_gate: CaseGate | None = None
+    check_sets: list[CaseChecks] = Field(default_factory=list)
+    derived_metrics: DerivedMetrics | None = None
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     # Axes of values the suite runs every combination of (martian.evals.matrix).
     matrix: dict[str, MatrixAxis] = Field(default_factory=dict)
@@ -634,13 +683,20 @@ class Suite(_Model):
         labels = [check.label for check in self.checks]
         if len(set(labels)) != len(labels):
             raise ValueError("check names must be unique; give repeated check types a name")
-        kinds = [check.type for check in self.checks if check.type in JUDGES]
-        if len(set(kinds)) != len(kinds):
-            raise ValueError(f"use at most one check of each judge type ({', '.join(JUDGES)})")
+        metrics = validate_gates(self.case_gate, self.check_sets, labels)
+        if self.derived_metrics is not None:
+            self.derived_metrics.validate_measurements(metrics)
+        singletons = [check.type for check in self.checks if check.type in JUDGES and check.type != SCORED_RUBRIC]
+        if len(set(singletons)) != len(singletons):
+            raise ValueError("use at most one check of each judge type other than scored_rubric")
         single = [check for check in self.checks if check.type in JUDGES and check.panel is None]
         if single and (self.judge is None or self.judge.model is None):
             raise ValueError("LLM judge checks need a judge.model, or a panel of their own")
-        if self.limits.max_judge_tokens is not None and not kinds and self.simulator is None:
+        if (
+            self.limits.max_judge_tokens is not None
+            and not any(check.type in JUDGES for check in self.checks)
+            and self.simulator is None
+        ):
             raise ValueError(
                 "limits.max_judge_tokens counts the tokens of LLM judge checks and simulated users, "
                 "and the suite has neither"
@@ -759,23 +815,37 @@ def load_cases(path: str | Path, *, input_key: str = "message") -> list[dict[str
         text = file.read_text(encoding="utf-8-sig")
     except OSError as error:
         raise ConfigError(f"could not read the data file: {type(error).__name__}") from None
+    return parse_cases(text, suffix=suffix, input_key=input_key)
+
+
+def parse_cases(text: str, *, suffix: str, input_key: str = "message") -> list[dict[str, Any]]:
+    """Parse the contents of a JSONL or CSV dataset without opening a file."""
+    if suffix not in (".jsonl", ".csv"):
+        raise ConfigError("the data file must be .jsonl or .csv")
+    text = text.removeprefix("\ufeff")
     records: list[dict[str, Any]] = []
     if suffix == ".jsonl":
-        for number, line in enumerate(text.splitlines(), 1):
+        # Unicode line-separator characters can be part of a valid JSON string.
+        for number, line in enumerate(text.split("\n"), 1):
             if not line.strip():
                 continue
             try:
                 record = json.loads(line)
-            except ValueError:
+            except (ValueError, RecursionError):
                 raise ConfigError(f"data line {number} is not valid JSON") from None
             if not isinstance(record, dict):
                 raise ConfigError(f"data line {number} must be a JSON object")
             records.append(record)
     else:
-        for record in csv.DictReader(text.splitlines()):
-            known = {key: record.get(key) for key in ("id", "input", "output")}
-            expectations = {k: v for k, v in record.items() if k not in known and k and v not in (None, "")}
-            records.append({**{k: v for k, v in known.items() if v not in (None, "")}, "expectations": expectations})
+        try:
+            for record in csv.DictReader(text.splitlines()):
+                known = {key: record.get(key) for key in ("id", "input", "output")}
+                expectations = {k: v for k, v in record.items() if k not in known and k and v not in (None, "")}
+                records.append(
+                    {**{k: v for k, v in known.items() if v not in (None, "")}, "expectations": expectations}
+                )
+        except csv.Error as error:
+            raise ConfigError(f"could not read the CSV dataset: {error}") from None
     cases: list[dict[str, Any]] = []
     seen: set[str] = set()
     for position, record in enumerate(records, 1):
@@ -811,6 +881,37 @@ def load_cases(path: str | Path, *, input_key: str = "message") -> list[dict[str
     if not cases:
         raise ConfigError("the data file has no cases")
     return cases
+
+
+def validate_case_plan(
+    suite: Suite, cases: list[dict[str, Any]], *, max_judge_tokens: int | None, cached: bool
+) -> None:
+    """Check that the selected cases can run under the supplied suite settings."""
+    stored = sum("outputs" in case for case in cases)
+    if suite.target is None and stored != len(cases):
+        raise ConfigError("without a target, every case needs an `outputs` (or `output`) value to grade")
+    if suite.target is not None and stored and not suite.check_sets:
+        raise ConfigError("the data file has stored outputs and the suite also names a target; use one or the other")
+    if (
+        max_judge_tokens is not None
+        and not any(check.type in JUDGES for check in suite.checks)
+        and not any("simulated_user" in case for case in cases)
+    ):
+        raise ConfigError(
+            "max_judge_tokens counts the tokens of LLM judge checks and simulated users, and the run has neither"
+        )
+    if suite.matrix and suite.target is not None and suite.target.file is not None:
+        for case in cases:
+            if clash := sorted(set(case["inputs"]) & set(suite.matrix)):
+                raise ConfigError(
+                    f"case {case['id']} has an input named {clash[0]}, and the function target also takes the "
+                    f"matrix's axis {clash[0]} as a keyword argument; rename the axis or the input"
+                )
+    if cached and any(_conversation(case) for case in cases):
+        raise ConfigError(
+            "the data has conversation cases, and the cache of model calls does not hold a conversation's turns; "
+            "run the suite without the cache (--no-cache)"
+        )
 
 
 def _turns(record: dict[str, Any], identifier: str, input_key: str) -> list[dict[str, Any]]:
@@ -1002,16 +1103,18 @@ def _unreachable(error: httpx.HTTPError) -> TargetCallError:
     return TargetCallError(f"the target could not be reached: {type(error).__name__}; check target.url")
 
 
-def _reply(response: httpx.Response, steps: list[str]) -> Any:
+def _reply(response: httpx.Response, steps: list[str], mode: ResponseMode | None = None) -> Any:
     """The output in a target's response: its text, or the value at ``response_path`` (``steps``).
     An error status or a missing value is a ``TargetCallError`` naming the setting to check."""
     if not response.is_success:
         raise TargetCallError(_status_reason(response))
-    if not steps:
+    if not steps and mode is None:
         return response.text
     try:
         reply = response.json()
     except ValueError:
+        if not steps:
+            return response.text
         raise TargetCallError("the target's response is not JSON, so response_path cannot be read") from None
     for step in steps:
         if isinstance(reply, dict) and step in reply:
@@ -1020,8 +1123,12 @@ def _reply(response: httpx.Response, steps: list[str]) -> Any:
             reply = reply[int(step)]
         else:
             raise TargetCallError("the target's response has no value at response_path")
-    if reply is None:
+    if steps and reply is None:
         raise TargetCallError("the target's response has no value at response_path")
+    if mode == "json_or_text":
+        if not steps and not isinstance(reply, dict | list) and not reply:
+            return response.text
+        return reply if isinstance(reply, str) else json.dumps(reply, ensure_ascii=False, separators=(",", ":"))
     return reply
 
 
@@ -1060,7 +1167,7 @@ def _http_target(reference: TargetRef, input_key: str, matrix: Mapping[str, Any]
             raise TargetCallError(TIMED_OUT) from None
         except httpx.HTTPError as error:
             raise _unreachable(error) from None
-        return _reply(response, steps)
+        return _reply(response, steps, reference.response_mode)
 
     def call(**inputs: Any) -> Any:
         return send(inputs)
@@ -1370,7 +1477,10 @@ def _http_request(
 
     def request(inputs: dict[str, Any]) -> dict[str, Any]:
         body = request_body(reference.body, inputs, input_key, matrix=matrix, keyed=True)
-        return {"url": url, "headers": headers, "body": body, "response_path": steps}
+        found = {"url": url, "headers": headers, "body": body, "response_path": steps}
+        if reference.response_mode is not None:
+            found["response_mode"] = reference.response_mode
+        return found
 
     return request
 
@@ -1498,6 +1608,7 @@ def _build_scorers(suite: Suite, base: Path, cache: ModelCallCache | None = None
     }
     factories: dict[str, Callable[..., Any]] = {
         "rubric": judges.response_rubric,
+        SCORED_RUBRIC: judges.scored_rubric,
         "guidelines": judges.response_guidelines,
         "conditions": judges.response_conditions,
         "groundedness": grounding.groundedness,
@@ -1520,8 +1631,17 @@ def _build_scorers(suite: Suite, base: Path, cache: ModelCallCache | None = None
             factory = factories[check.type]
             # A conversation judge reads the conversation a conversation check is given, not an input.
             if check.type not in CONVERSATION_JUDGES:
-                options["input_key"] = suite.input_key
                 options["cache"] = cache
+                if check.type != SCORED_RUBRIC:
+                    options["input_key"] = suite.input_key
+            if check.type == SCORED_RUBRIC:
+                options.update(
+                    rubric=check.rubric,
+                    judge_prompt=check.judge_prompt,
+                    expectation=check.expectation,
+                    score_threshold=check.score_threshold,
+                    negate=check.negate,
+                )
             if check.panel is not None:
                 built.append(judge_panel(factory, models=check.panel, **options))
             else:
@@ -1545,9 +1665,9 @@ def _build_check(check: CheckSpec) -> Any:
     text: dict[str, Any] = {"expectation": check.expectation, "name": name, "case_sensitive": check.case_sensitive}
     match check.type:
         case "contains":
-            return deterministic.contains(*check.values, any_of=check.any_of, **text)
+            return deterministic.contains(*check.values, any_of=check.any_of, case_mapping=check.case_mapping, **text)
         case "not_contains":
-            return deterministic.not_contains(*check.values, **text)
+            return deterministic.not_contains(*check.values, case_mapping=check.case_mapping, **text)
         case "contains_any":
             return deterministic.contains_any(*check.values, **text)
         case "contains_all":
@@ -1561,17 +1681,31 @@ def _build_check(check: CheckSpec) -> Any:
         case "similarity":
             assert check.min_similarity is not None
             return deterministic.similarity(*check.values, min_similarity=check.min_similarity, **text)
+        case "levenshtein":
+            return deterministic.levenshtein(
+                *check.values, max_edits=check.max_edits, expectation=check.expectation, negate=check.negate, name=name
+            )
         case "matches":
             return deterministic.matches(check.pattern or "", name=name)
         case "not_matches":
             return deterministic.not_matches(check.pattern or "", name=name)
         case "is_json":
-            return deterministic.is_json(required_keys=check.required_keys, name=name)
+            return deterministic.is_json(required_keys=check.required_keys, name=name, plain_json=check.plain_json)
+        case "is_xml":
+            return deterministic.is_xml(
+                required_elements=check.required_elements, fragment=check.fragment, negate=check.negate, name=name
+            )
         case "json_schema":
             assert check.json_schema is not None
-            return deterministic.json_schema(check.json_schema, name=name)
+            return deterministic.json_schema(
+                check.json_schema, name=name, plain_json=check.plain_json, negate=check.negate, embedded=check.embedded
+            )
         case "length":
             return deterministic.length(min_length=check.min_length, max_length=check.max_length, name=name)
+        case "word_count":
+            return deterministic.word_count(
+                min_words=check.min_words, max_words=check.max_words, negate=check.negate, name=name
+            )
         case "latency":
             assert check.max_ms is not None
             return deterministic.latency(max_ms=check.max_ms, name=name)
@@ -1632,7 +1766,9 @@ def _build_check(check: CheckSpec) -> Any:
     raise AssertionError(f"{check.type} is not a deterministic check")
 
 
-def _with_suite_criteria(case: dict[str, Any], suite: Suite, scope: CheckScope | None = None) -> dict[str, Any]:
+def _with_suite_criteria(
+    case: dict[str, Any], suite: Suite, scope: CheckScope | None = None, *, checked: Collection[str] | None = None
+) -> dict[str, Any]:
     """Fill in criteria given once in the suite file for rows that do not carry their own. ``scope``
     is what the row is graded as in a conversation case, a turn or the whole conversation, so only
     the checks of that scope give their criteria; a case of one input (None) takes every check's.
@@ -1641,7 +1777,7 @@ def _with_suite_criteria(case: dict[str, Any], suite: Suite, scope: CheckScope |
     expectations = dict(case["expectations"])
     for check in suite.checks:
         key = CRITERIA_KEYS.get(check.type)
-        if key is None or scope not in (None, check.scope):
+        if key is None or scope not in (None, check.scope) or (checked is not None and check.label not in checked):
             continue
         if (value := getattr(check, key)) is not None and key not in expectations:
             expectations[key] = value
@@ -1661,17 +1797,29 @@ def _digest(value: Any) -> str:
 
 
 def _left_out(check: CheckSpec) -> set[str]:
-    """The fields of a check a fingerprint and a baseline digest leave out when the check leaves
-    them at their default: a panel, an installed check's options and the default scope. So a check
-    that sets none of them keeps the fingerprint and digest it had before they existed."""
+    """Omit newer options at their defaults so earlier fingerprints and baseline digests still match."""
     return (
         ({"panel"} if check.panel is None else set())
         | ({"options"} if check.options is None else set())
         | ({"scope"} if check.scope == "turn" else set())
+        | ({"case_mapping"} if check.case_mapping == "casefold" else set())
+        | ({"max_edits"} if check.type != "levenshtein" else set())
+        | ({"min_words", "max_words"} if check.type != "word_count" else set())
+        | ({"plain_json"} if not check.plain_json else set())
+        | ({"embedded"} if check.embedded is None else set())
+        | ({"negate"} if not check.negate else set())
+        | ({"judge_prompt"} if check.judge_prompt is None else set())
+        | ({"score_threshold"} if check.score_threshold is None else set())
     )
 
 
-def _suite_fingerprint(suite: Suite, base: Path, matrix: Mapping[str, Any] | None = None) -> str:
+def _suite_fingerprint(
+    suite: Suite,
+    base: Path,
+    matrix: Mapping[str, Any] | None = None,
+    *,
+    resolved_target_url: str | None = None,
+) -> str:
     """Everything in the suite a verdict depends on: the checks and their criteria, the judge model
     and its parameters, the target, the values of the combination of the suite's matrix that
     ``matrix`` gives, and the SDK version that holds the judge prompts.
@@ -1682,6 +1830,8 @@ def _suite_fingerprint(suite: Suite, base: Path, matrix: Mapping[str, Any] | Non
     address in the environment, say how its endpoint is reached. A function target and a python
     check count by the contents of their files; modules those files import and the service behind a
     URL target cannot be seen from here.
+    A run can give the resolved URL of an environment-backed target so a change
+    of endpoint invalidates its results.
 
     With repeats, the attempts per case and the rule each check's attempts combine by count too.
     With one attempt every rule gives the same verdict, so neither counts and the fingerprint is
@@ -1692,6 +1842,10 @@ def _suite_fingerprint(suite: Suite, base: Path, matrix: Mapping[str, Any] | Non
     target: dict[str, Any] | None = None
     if suite.target is not None:
         target = suite.target.model_dump(mode="json", exclude={"timeout_seconds"})
+        if suite.target.response_mode is None:
+            target.pop("response_mode", None)
+        if resolved_target_url is not None:
+            target["resolved_url"] = key_address(resolved_target_url)
         if suite.target.file is not None:
             file = Path(suite.target.file)
             file = file if file.is_absolute() else base / file
@@ -1719,10 +1873,14 @@ def _suite_fingerprint(suite: Suite, base: Path, matrix: Mapping[str, Any] | Non
         }
     if matrix is not None:
         definition["matrix"] = dict(matrix)
+    if suite.case_gate is not None:
+        definition["case_gate"] = suite.case_gate.model_dump(mode="json")
     return _digest(definition)
 
 
-def _case_fingerprint(suite_fingerprint: str, case: dict[str, Any], suite: Suite | None = None) -> str:
+def _case_fingerprint(
+    suite_fingerprint: str, case: dict[str, Any], suite: Suite | None = None, *, selected: CaseChecks | None = None
+) -> str:
     """What a case's verdict depends on besides the suite: its inputs, expectations and stored
     output, and a conversation's turns. A simulated conversation's depends on its simulated user
     and the suite's simulator too: the simulator's model and inference parameters and, with
@@ -1734,6 +1892,8 @@ def _case_fingerprint(suite_fingerprint: str, case: dict[str, Any], suite: Suite
         "expectations": case["expectations"],
         "outputs": case.get("outputs"),
     }
+    if selected is not None:
+        found["check_set"] = selected.model_dump(mode="json", exclude={"cases", "aliases"})
     if "turns" in case:
         found["turns"] = case["turns"]
     if "simulated_user" in case:
@@ -1761,10 +1921,11 @@ class Results:
     def records(self) -> dict[str, dict[str, Any]]:
         found: dict[str, dict[str, Any]] = {}
         if self.path.exists():
-            for line in self.path.read_text(encoding="utf-8").splitlines():
-                if line.strip():
-                    record = json.loads(line)
-                    found[record["id"]] = record
+            with self.path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    if line.strip():
+                        record = json.loads(line)
+                        found[record["id"]] = record
         return found
 
     def append(self, record: dict[str, Any]) -> None:
@@ -2190,34 +2351,14 @@ def run_suite(
     total = len(cases)
     if limit is not None:
         cases = cases[:limit]
-    stored = [case for case in cases if "outputs" in case]
-    if suite.target is None and len(stored) != len(cases):
-        raise ConfigError("without a target, every case needs an `outputs` (or `output`) value to grade")
-    if suite.target is not None and stored:
-        raise ConfigError("the data file has stored outputs and the suite also names a target; use one or the other")
     limits = RunLimits(
         max_seconds=suite.limits.max_seconds if max_seconds is None else max_seconds,
         max_judge_tokens=suite.limits.max_judge_tokens if max_judge_tokens is None else max_judge_tokens,
     )
     judges = {check.label for check in suite.checks if check.type in JUDGES}
-    if limits.max_judge_tokens is not None and not judges and not any("simulated_user" in case for case in cases):
-        raise ConfigError(
-            "max_judge_tokens counts the tokens of LLM judge checks and simulated users, and the run has neither"
-        )
-    matrix = combinations(suite.matrix)
-    if matrix and suite.target is not None and suite.target.file is not None:
-        for case in cases:
-            if clash := sorted(set(case["inputs"]) & set(suite.matrix)):
-                raise ConfigError(
-                    f"case {case['id']} has an input named {clash[0]}, and the function target also takes the "
-                    f"matrix's axis {clash[0]} as a keyword argument; rename the axis or the input"
-                )
     cached = suite.cache is not None if cache is None else cache
-    if cached and any(_conversation(case) for case in cases):
-        raise ConfigError(
-            "the data has conversation cases, and the cache of model calls does not hold a conversation's turns; "
-            "run the suite without the cache (--no-cache)"
-        )
+    validate_case_plan(suite, cases, max_judge_tokens=limits.max_judge_tokens, cached=cached)
+    matrix = combinations(suite.matrix)
     calls = _open_cache(suite, base, home) if cached else None
     folder = Path(output) if output is not None else base / suite.output
     say = progress or (lambda message: None)
@@ -2484,6 +2625,7 @@ def _run_one(
     with its run and its comparison, and its verdicts. ``earlier`` is the baseline's verdicts of
     this suite or combination, if the baseline has any."""
     from martian.evals import baseline as baselines
+    from martian.evals.judges import RUBRIC_SCORE_KEY
     from martian.evals.limits import Budget
     from martian.evals.local import data_folder
     from martian.evals.run_record import GradedCase, RunRecorder
@@ -2494,10 +2636,13 @@ def _run_one(
     repeat_plan = suite.repeat_plan()
     rules: dict[str, CombineRule] = {label: rule["combine"] for label, rule in repeat_plan["checks"].items()}
     scorers = plan.scorers
+    assignments = case_check_index(suite.check_sets)
+    security = suite.security_checks()
     limits, judges = plan.limits, set(plan.judges)
     isolation = plan.isolation
     labels = [check.label for check in suite.checks]
     panelled = {check.label for check in suite.checks if check.panel is not None}
+    scored_rubrics = {check.label for check in suite.checks if check.type == SCORED_RUBRIC}
     scorer_of = dict(zip(labels, scorers, strict=True))
     scopes: dict[str, CheckScope] = {check.label: check.scope for check in suite.checks}
     turn_labels = [label for label in labels if scopes[label] == "turn"]
@@ -2512,13 +2657,24 @@ def _run_one(
     # A simulated conversation's goal verdict is a conversation-level result beside its checks',
     # combined over attempts by the suite's rule. Only conversations have one.
     simulator = _build_simulator(suite) if any("simulated_user" in case for case in cases) else None
-    graded_labels = [*labels, GOAL] if simulator is not None else labels
+    graded_labels = list(labels)
+    has_gate = suite.case_gate is not None or any(selected.case_gate is not None for selected in suite.check_sets)
+    if has_gate:
+        graded_labels.append(CASE_GATE)
+        scopes[CASE_GATE] = "conversation"
     talk_rules = dict(rules)
     if simulator is not None:
+        graded_labels.append(GOAL)
         scopes[GOAL] = "conversation"
         repeat_plan["checks"][GOAL] = {"combine": suite.combine, "from": "suite"}
         talk_rules[GOAL] = suite.combine
     workers = plan.concurrency or suite.concurrency
+    target_url = suite.target.url if suite.target is not None else None
+    resolved_url = (
+        _from_environment(target_url, "target.url")
+        if target_url is not None and _ENV_REFERENCE.search(target_url)
+        else None
+    )
 
     # Opened before the output folder changes, so a data folder that cannot be opened stops here.
     cache = plan.cache
@@ -2532,8 +2688,13 @@ def _run_one(
         if cache is not None:
             cache.begin()
         results = Results(folder, resume=plan.resume)
-        suite_print = _suite_fingerprint(suite, base, None if combination is None else combination.values)
-        prints = {case["id"]: _case_fingerprint(suite_print, case, suite) for case in cases}
+        suite_print = _suite_fingerprint(
+            suite, base, None if combination is None else combination.values, resolved_target_url=resolved_url
+        )
+        prints = {
+            case["id"]: _case_fingerprint(suite_print, case, suite, selected=assignments.get(case["id"]))
+            for case in cases
+        }
         positions = {case["id"]: position for position, case in enumerate(cases)}
         # An earlier verdict is reused only when it was produced by exactly this suite and case.
         finished = {i: r for i, r in results.records().items() if r["passed"] is not None and i in prints}
@@ -2585,7 +2746,7 @@ def _run_one(
                 else (),
             )
 
-        def outcome(frame: Any, position: int, checked: list[str], why: Callable[[], str | None]) -> dict[str, Any]:
+        def outcome(frame: Any, position: int, checked: Sequence[str], why: Callable[[], str | None]) -> dict[str, Any]:
             """One call's verdict, the verdicts of the checks ``checked`` that graded it, its reply and
             its target error, from its row of the frame. ``why`` says why a failed call failed."""
             response = frame["response"].iloc[position] if "response" in frame.columns else None
@@ -2596,12 +2757,24 @@ def _run_one(
             reason = (why() if broke else None) or ("the target call failed" if broke else None)
             # A panel check's votes, from its feedback's metadata (martian.evals.panel).
             votes: dict[str, dict[str, str]] = {}
+            rubric_scores: dict[str, float] = {}
             assessments = frame["assessments"].iloc[position] if "assessments" in frame.columns else None
-            for item in assessments if isinstance(assessments, list) else []:
-                found = (item.get("metadata") or {}) if isinstance(item, dict) else {}
-                panel = {key: str(value) for key, value in found.items() if str(key).startswith(PANEL_PREFIX)}
-                if panel and item.get("assessment_name") in panelled:
-                    votes[str(item["assessment_name"])] = panel
+            for item in assessments if isinstance(assessments, list) and not broke else []:
+                if not isinstance(item, dict):
+                    continue
+                label = str(item.get("assessment_name"))
+                found = item.get("metadata") or {}
+                if label in panelled:
+                    panel = {key: str(value) for key, value in found.items() if str(key).startswith(PANEL_PREFIX)}
+                    if panel:
+                        votes[label] = panel
+                if label in scored_rubrics and RUBRIC_SCORE_KEY in found:
+                    try:
+                        score = float(found[RUBRIC_SCORE_KEY])
+                    except (ValueError, TypeError):
+                        continue
+                    if math.isfinite(score):
+                        rubric_scores[label] = score
             verdicts: dict[str, dict[str, Any]] = {}
             for label in checked:
                 value = frame[f"{label}/value"].iloc[position] if f"{label}/value" in frame.columns else None
@@ -2625,6 +2798,10 @@ def _run_one(
                 }
                 if label in votes and not broke:
                     verdicts[label]["metadata"] = votes[label]
+                if label in scored_rubrics:
+                    verdicts[label]["value"] = rubric_scores.get(label) if passed is not None else None
+                    if passed is not None and label not in rubric_scores:
+                        verdicts[label].update(passed=None, error="the judge score was not recorded")
             values = [verdict["passed"] for verdict in verdicts.values()]
             return {
                 "passed": None if any(v is None for v in values) else all(values),
@@ -2635,7 +2812,7 @@ def _run_one(
 
         lost = f"no result was recorded for this {'attempt' if repeated else 'case'}"
 
-        def unrecorded(reason: str | None) -> dict[str, Any]:
+        def unrecorded(reason: str | None, checked: Sequence[str]) -> dict[str, Any]:
             """An attempt whose row MLflow left out, as it does a row whose trace it could not read
             back, such as a traced function's that had not ended. The attempt has no verdict, so it
             is an error now, with the target's reason when it gave one (NOT_RUN when the run had
@@ -2643,10 +2820,32 @@ def _run_one(
             detail = "the target failed" if reason else lost
             return {
                 "passed": None,
-                "checks": {label: {"passed": None, "rationale": None, "error": detail} for label in labels},
+                "checks": {label: {"passed": None, "rationale": None, "error": detail} for label in checked},
                 "output": None,
                 "error": reason,
             }
+
+        def case_outcome(
+            attempts: list[dict[str, Any]],
+            active: dict[str, CombineRule],
+            *,
+            selected: CaseChecks | None = None,
+            simulated: bool = False,
+        ) -> dict[str, Any]:
+            # Combine the raw checks first. A weighted case uses those same combined verdicts.
+            result = combine_attempts(attempts, active) if repeated else attempts[0]
+            gate = selected.case_gate if selected is not None else suite.case_gate
+            if gate is not None:
+                checked = selected.checks if selected is not None else labels
+                required = [label for label in security if label in checked] + ([GOAL] if simulated else [])
+                for attempt in attempts:
+                    gate.apply(attempt, checked, required)
+                if repeated:
+                    gate.apply(result, checked, required, incomplete=any(a["passed"] is None for a in attempts))
+            if repeated:
+                chosen = attempts[representative([a["passed"] for a in attempts], result["passed"])]
+                result.update({key: chosen[key] for key in ("output", "error", "session_id", "turns") if key in chosen})
+            return result
 
         def converse(talks: list[dict[str, Any]]) -> dict[tuple[str, int], tuple[dict[str, Any], list[Any]]]:
             """Every attempt of each conversation case: its record and its turns' traces, by case id
@@ -2888,13 +3087,24 @@ def _run_one(
         try:
             mlflow.set_tracking_uri(suite.mlflow.tracking_uri or f"sqlite:///{folder.resolve() / 'mlflow.db'}")
             mlflow.set_experiment(suite.mlflow.experiment or path.stem)
-            for start in range(0, len(todo), suite.batch):
+            planned_batches: dict[tuple[tuple[str, ...], bool], list[dict[str, Any]]] = {}
+            all_checks = tuple(labels)
+            for case in todo:
+                selected = assignments.get(case["id"])
+                key = (selected.checks if selected is not None else all_checks, "outputs" in case)
+                planned_batches.setdefault(key, []).append(case)
+            batches = (
+                (checked, stored_batch, grouped[start : start + suite.batch])
+                for (checked, stored_batch), grouped in planned_batches.items()
+                for start in range(0, len(grouped), suite.batch)
+            )
+            for checked, stored_batch, batch in batches:
                 # Limits are checked before each batch, and before each target call within one:
                 # a batch's judges finish once it has started.
                 if stopping():
                     break
-                batch = todo[start : start + suite.batch]
                 singles = [case for case in batch if not _conversation(case)]
+                current_calls = None if stored_batch else calls
                 rows: dict[tuple[str, int], tuple[dict[str, Any], Any]] = {}
                 if singles:
                     data = []
@@ -2903,7 +3113,7 @@ def _run_one(
                         for number in numbers:
                             row: dict[str, Any] = {
                                 "inputs": case["inputs"],
-                                "expectations": _with_suite_criteria(case, suite),
+                                "expectations": _with_suite_criteria(case, suite, checked=checked),
                                 "tags": {"martian_case_id": case["id"]}
                                 | ({"martian_attempt": str(number)} if repeated else {}),
                             }
@@ -2911,7 +3121,9 @@ def _run_one(
                                 row["outputs"] = case["outputs"]
                             data.append(row)
                     frame: Any = evaluate_rows(
-                        data=data, scorers=scorers, predict_fn=calls.predict_fn if calls else None
+                        data=data,
+                        scorers=[scorer_of[label] for label in checked],
+                        predict_fn=current_calls.predict_fn if current_calls else None,
                     ).result_df  # never None: evaluate_rows raises
                     by_id = {case["id"]: case for case in singles}
                     for position in range(len(frame)):
@@ -2920,8 +3132,8 @@ def _run_one(
                         # A case's attempts send the same inputs, so each failed attempt takes one of
                         # the reasons its case's calls failed with; attempts that ran at once may swap
                         # theirs.
-                        explain = partial(calls.failure_reason, case["inputs"]) if calls else _no_reason
-                        found = outcome(frame, position, labels, explain)
+                        explain = partial(current_calls.failure_reason, case["inputs"]) if current_calls else _no_reason
+                        found = outcome(frame, position, checked, explain)
                         if found["error"] != NOT_RUN and "assessments" in frame.columns:
                             for tokens in _judge_tokens(frame["assessments"].iloc[position], judges):
                                 budget.spend(tokens)
@@ -2942,13 +3154,9 @@ def _run_one(
                             {"number": number, **found}
                             for number, (found, _) in zip(numbers, conversations, strict=True)
                         ]
-                        result = conversations[0][0]
-                        if repeated:
-                            # A check that grades nothing in this case has no verdict to combine.
-                            used = {label: rule for label, rule in talk_rules.items() if label in attempts[0]["checks"]}
-                            result = combine_attempts(attempts, used)
-                            chosen = attempts[representative([a["passed"] for a in attempts], result["passed"])]
-                            result |= {"session_id": chosen["session_id"], "turns": chosen["turns"]}
+                        # A check that grades nothing in this case has no verdict to combine.
+                        used = {label: rule for label, rule in talk_rules.items() if label in attempts[0]["checks"]}
+                        result = case_outcome(attempts, used, simulated="simulated_user" in case)
                         record = {
                             "id": case["id"],
                             "passed": result["passed"],
@@ -2959,6 +3167,8 @@ def _run_one(
                             "error": result["error"],
                             "fingerprint": prints[case["id"]],
                         }
+                        if metrics := result.get("named_metrics"):
+                            record["named_metrics"] = metrics
                         if "simulated_user" in case:
                             record["simulated"] = True
                         if repeated:
@@ -2968,7 +3178,12 @@ def _run_one(
                         continue
                     tried = [
                         rows.get((case["id"], number))
-                        or (unrecorded(calls.failure_reason(case["inputs"]) if calls else None), None)
+                        or (
+                            unrecorded(
+                                current_calls.failure_reason(case["inputs"]) if current_calls else None, checked
+                            ),
+                            None,
+                        )
                         for number in numbers
                     ]
                     # The run stopped before this case, or before some of its attempts: it has no
@@ -2977,7 +3192,9 @@ def _run_one(
                     if any(found["error"] == NOT_RUN for found, _ in tried):
                         continue
                     attempts = [{"number": number, **found} for number, (found, _) in zip(numbers, tried, strict=True)]
-                    result = combine_attempts(attempts, rules) if repeated else tried[0][0]
+                    result = case_outcome(
+                        attempts, {label: rules[label] for label in checked}, selected=assignments.get(case["id"])
+                    )
                     record = {
                         "id": case["id"],
                         "passed": result["passed"],
@@ -2987,6 +3204,8 @@ def _run_one(
                         "error": result["error"],
                         "fingerprint": prints[case["id"]],
                     }
+                    if metrics := result.get("named_metrics"):
+                        record["named_metrics"] = metrics
                     if repeated:
                         record["attempts"] = attempts
                     results.append(record)
@@ -3037,6 +3256,14 @@ def _run_one(
             not_run=len(not_run),
             stopped=stopped,
         )
+        if suite.case_gate is not None:
+            summary["case_gate"] = suite.case_gate.model_dump(mode="json", exclude_none=True)
+        if suite.check_sets:
+            summary["check_sets"] = len(suite.check_sets)
+        if has_gate or suite.derived_metrics is not None:
+            reports = _metric_reports(ordered, groups, suite.derived_metrics)
+            summary.update(reports)
+            recorder.measured_metrics(reports)
         cached = None if cache is None else _cache_report(suite, cache)
         if cached is not None:
             summary["cache"] = cached
@@ -3074,6 +3301,34 @@ def _run_one(
             assert stopped is not None  # only a limit or a cancel leaves a case not run
             recorder.stop(stopped)
     return {**summary, "run": recorder.reference(), **({"comparison": comparison} if comparison else {})}, found
+
+
+def _metric_reports(
+    ordered: Sequence[dict[str, Any]], groups: Mapping[str, str], derived: DerivedMetrics | None
+) -> dict[str, list[dict[str, Any]]]:
+    by_case = {
+        record["id"]: {
+            name: named_metrics.CaseMetric.model_validate(value)
+            for name, value in record.get("named_metrics", {}).items()
+        }
+        for record in ordered
+    }
+    named = named_metrics.summarize(by_case.values())
+    reports = {"named_metrics": named} if named else {}
+    if derived is None or not ordered:
+        return reports
+    if derived.group_by is None:
+        reports["derived_metrics"] = derived.report(named, cases=len(ordered))
+        return reports
+    buckets: dict[str | None, list[dict[str, named_metrics.CaseMetric]]] = {}
+    for case_id, measured in by_case.items():
+        buckets.setdefault(groups.get(case_id), []).append(measured)
+    reports["derived_metrics"] = [
+        row
+        for group, bucket in buckets.items()
+        for row in derived.report(named_metrics.summarize(bucket), cases=len(bucket), group=group)
+    ]
+    return reports
 
 
 def _verdicts(
@@ -3121,11 +3376,33 @@ def _verdicts(
         )
     # With repeats a check's reason is how its attempts went under its rule, the SDK's own words.
     plain = {check.label for check in suite.checks if repeats or check.type in baselines.PLAIN_REASONS}
+    gate_digest = None
+    scoped: dict[str, str] = {}
+    security = suite.security_checks()
+
+    def gate_digest_for(checked: Sequence[str], gate: CaseGate | None) -> str:
+        return baselines.digest(
+            {
+                "gate": gate.scoring_rules() if gate is not None else None,
+                "checks": checked,
+                "required": [label for label in security if label in checked],
+            }
+        )
+
+    if suite.case_gate is not None:
+        gate_digest = gate_digest_for([check.label for check in suite.checks], suite.case_gate)
+    if (definition := gate_definition(suite.case_gate, suite.check_sets)) is not None:
+        checks[CASE_GATE] = gate_digest or baselines.digest(definition)
+        plain.add(CASE_GATE)
+    for selected in suite.check_sets:
+        profile = gate_digest_for(selected.checks, selected.case_gate)
+        scoped.update(dict.fromkeys(selected.cases, profile))
     digests = {
         case["id"]: baselines.case_digest(
             case["inputs"],
             case["expectations"],
             {key: case[key] for key in ("turns", "simulated_user") if key in case},
+            gate=scoped.get(case["id"], gate_digest),
         )
         for case in cases
     }

@@ -305,6 +305,9 @@ READER_PROVENANCE: dict[str, tuple[str, ...] | None] = {
     "prompt_version": None,
     "target": ("kind", "agent_id", "name", "digest"),
     "suite": ("id", "version", "version_id", "name", "digest", "model_judges"),
+    "case_gate": ("threshold", "weights", "assertion_sets", "metrics"),
+    "named_metrics": ("name", "cases", "score", "score_total", "weight"),
+    "derived_metrics": ("name", "formula", "group", "cases", "score", "error"),
     "repeats": ("attempts", "combine", "checks"),
     # How many of a run's cases are conversations, and the model that played their simulated
     # users (martian.evals.run_record).
@@ -353,6 +356,10 @@ READER_PROVENANCE: dict[str, tuple[str, ...] | None] = {
     "promptfoo": (
         "results",
         "results_sha256",
+        "archive_sha256",
+        "import_copy",
+        "artifact_version",
+        "media",
         "results_version",
         "eval_id",
         "timestamp",

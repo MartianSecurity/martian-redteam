@@ -140,7 +140,7 @@ martian ui
 martian evals import inspect logs/*.eval
 # promptfoo results as runs in that UI, and a promptfoo config as suite files (see the evals core guide):
 martian evals import promptfoo results.json
-martian evals convert promptfoo promptfooconfig.yaml --target agent.py:answer --output suite
+martian evals convert promptfoo promptfooconfig.yaml --target agent.py:answer --strict --dry-run --output suite
 # An MLflow tracking store copied into that UI, after a schema version check:
 martian evals import mlflow ./mlflow.db
 # All of that UI's data exported, resumably, and loaded into a fresh data folder (see data export):
@@ -245,6 +245,72 @@ Checks/redteam tests use Backend's journaled private MLflow export: one run per
 test, session/commit/provenance tags, counts/status and `results.json` containing
 the preserved judgments and policy. Dataset tests export their own EvalRun.
 SDK clients never receive the organisation's MLflow credentials.
+
+## Connect an MCP client to local reports
+
+Install `martian-sdk[evals,mcp]` and point the client at the data folder where `martian ui` or
+the SDK saved your runs. `martian mcp` serves the selected project over stdio. It opens the
+SQLite record store read-only and reads saved records as the client requests them. If the
+folder needs initialization or a schema upgrade, open it with `martian ui` first.
+
+In a client configuration that uses `mcpServers`, give the full path to the installed `martian`
+executable and the local data folder.
+
+```json
+{
+  "mcpServers": {
+    "martian": {
+      "command": "/path/to/venv/bin/martian",
+      "args": ["mcp", "--data-dir", "/path/to/local-data", "--project-id", "default"]
+    }
+  }
+}
+```
+
+Omit `--data-dir` to use `MARTIAN_EVALS_HOME` or `~/.martian/evals`. The project defaults to
+`default`. Use a separate server configuration for each additional project you want to read.
+Use `"args": ["mcp", "--preview-only"]` to make the suite validation and check tools available
+in a new workspace without opening or creating a local store.
+
+| Tool | What it returns |
+| --- | --- |
+| `list_runs` | Run IDs, state, timestamps and counts. Choose `kind` `eval` or `redteam` |
+| `get_evaluation` | Evaluation counts and case IDs with recorded verdicts and latency |
+| `list_findings` | Finding summaries and triage state, with search and filters for severity, status, evidence, category, recurrence, target and scan |
+| `get_finding` | Scan and attempt references, review decisions and evidence behind verified fixes |
+| `get_remediation` | A finished scan's findings, recorded severity and ordered defensive actions |
+| `compare_remediation` | Recorded severity for both scans, matched coverage, results for baseline findings, and new or escalated findings |
+| `validate_suite` | Whether supplied native suite YAML and optional case data satisfy the suite's static rules |
+| `run_check` | The verdict and reason or error from a deterministic native check on supplied output |
+
+Tools return structured data. Report listings page at 25 records by default, with a maximum `limit`
+of 100. Convert the returned `next_cursor` to an integer for the next `offset`. Tools that return
+several lists give a cursor for each list. Use `list_runs` or `list_findings` to find detail IDs.
+
+Pass the text of a native suite in `suite_yaml`. Omit `case_data` to validate the definition, or
+supply `case_data.text` as CSV or JSONL in the format named by the suite's `data` field. Inline validation
+accepts up to 65,536 characters of YAML and 524,288 characters of case data. It reads the supplied
+text only. Run `martian evals validate path/to/evals.yaml` when you want the CLI to load the dataset
+relative to a local suite file.
+
+`run_check` accepts a [deterministic check name](evals.md#deterministic-checks) as `kind`, suite check
+`options`, and a `sample` with a JSON `output` value and optional `expectations`. A check for
+the expected library branch takes these arguments.
+
+```json
+{
+  "kind": "contains",
+  "options": {"expectation": "branch"},
+  "sample": {
+    "output": "The central library opens at nine.",
+    "expectations": {"branch": "central"}
+  }
+}
+```
+
+The result reports a `passed`, `failed` or `error` verdict. For `latency` or `cost`, provide the
+applicable measured value in `sample.latency_ms`, `sample.cost_usd` or `sample.total_tokens`. Missing measurements give
+an error. Both preview tools run locally with a 10-second time limit and leave saved runs untouched.
 
 ## Safe reports
 

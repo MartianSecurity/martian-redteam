@@ -85,6 +85,7 @@ from martian.redteam.model.maps import counts_of, findings_of
 from martian.redteam.runfile import RunFile
 from martian.redteam.targets import Target, TargetChanged, TargetReply
 from martian.redteam.targets.conversations import conversation_id
+from martian.redteam.targets.identity import NETWORK_TARGETS
 from martian.redteam.targets.reply import with_observed
 from martian.redteam.verify.canary import context_of, new_canary, uses_canary
 from martian.redteam.verify.canary import plant as plant_canary
@@ -251,6 +252,14 @@ class Engine:
         self.project_id = project_id
         self.checkpoint = checkpoint
         self.provenance = dict(provenance or {})
+        # A resumed run can establish a network route only if both sessions recorded that same route.
+        current_key = getattr(target, "findings_key", None)
+        findings_key = resume.provenance.get("findings_target") if resume is not None else current_key
+        if target.kind in NETWORK_TARGETS and findings_key != current_key:
+            findings_key = None
+        self.provenance.pop("findings_target", None)
+        if findings_key:
+            self.provenance["findings_target"] = findings_key
         self.planned = plan(run_file)
         self.skipped = skipped(run_file)
         self._memory = asyncio.Lock()

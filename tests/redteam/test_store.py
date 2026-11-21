@@ -2,6 +2,7 @@
 
 import os
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,7 @@ from sqlalchemy import create_engine, text
 
 from martian.evals.model import CaseResult, Run
 from martian.evals.records import RedteamRecords
-from martian.evals.records.sql import SqlRecordStore
+from martian.evals.records.sql import RedteamTriageEntry, SqlRecordStore
 from martian.evals.server.principal import Principal
 from martian.evals.store import StoreError
 from martian.redteam.model import Evidence, Verification
@@ -59,6 +60,21 @@ async def test_a_red_team_run_reads_back_as_it_was_saved(records):
     assert await store.get("p1", "rt-1", principal=ORG) == run
 
 
+async def test_review_restore_counts_new_entries_and_rolls_back_conflicting_batches(records):
+    created = datetime.now(UTC)
+    finding = "a" * 64
+    original = RedteamTriageEntry(finding, str(uuid.uuid4()), created, {"comment": "Original"})
+    new = RedteamTriageEntry(finding, str(uuid.uuid4()), created, {"comment": "New"})
+    conflicting = RedteamTriageEntry(finding, original.id, created, {"comment": "Conflicting"})
+
+    assert await records.restore_redteam_triage(ORG, "p1", [original], dry_run=False) == (1, 0)
+    assert await records.restore_redteam_triage(ORG, "p1", [original], dry_run=False) == (0, 1)
+    with pytest.raises(StoreError, match="conflicts with a saved review"):
+        await records.restore_redteam_triage(ORG, "p1", [new, conflicting], dry_run=False)
+    assert await records.get_redteam_triage_entry(ORG, "p1", new.id) is None
+    assert await records.get_redteam_triage_entry(ORG, "p1", original.id) == (finding, original.record)
+
+
 async def test_its_attempts_are_case_results_and_its_checks_are_scores(records):
     await RedteamStore(records).save(a_run(), principal=ORG)
     stored = await records.get_run(ORG, "p1", "rt-1")
@@ -97,9 +113,19 @@ async def test_an_eval_run_is_written_without_a_kind(records):
 
 
 async def test_an_organisation_does_not_see_another_organisations_red_team_run(records):
-    await RedteamStore(records).save(a_run(), principal=ORG)
+    await RedteamStore(records).save(
+        a_run().model_copy(update={"provenance": {"launch": {"target_id": "saved"}, "findings_target": "adapter"}}),
+        principal=ORG,
+    )
     assert await RedteamStore(records).get("p1", "rt-1", principal=OTHER) is None
     assert (await RedteamStore(records).list("p1", principal=OTHER)).items == []
+    scans, observations, notes = await records.read_redteam_inventory(ORG, "p1")
+    assert scans == 1 and len(observations) == 2 and notes == []
+    assert {item.run_id for item in observations} == {"rt-1"}
+    assert await records.read_redteam_inventory(OTHER, "p1") == (0, [], [])
+    keys = {"target_id": "saved", "adapter_identity": "adapter"}
+    assert [run.id for run in await records.list_redteam_target_runs(ORG, "p1", **keys)] == ["rt-1"]
+    assert await records.list_redteam_target_runs(OTHER, "p1", **keys) == []
 
 
 async def test_only_a_red_team_run_takes_red_team_records(records):

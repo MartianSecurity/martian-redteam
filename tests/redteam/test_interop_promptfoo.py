@@ -4,6 +4,7 @@ The sample project is ``examples/promptfoo-redteam``: a config and results writt
 shapes promptfoo's reference documents. promptfoo is not installed and nothing calls a real model."""
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -227,16 +228,14 @@ def test_results_import_as_one_run_whose_findings_are_suspected(tmp_path):
     probes = {probe.id: probe for probe in run.probes}
     assert "prompt_leakage:system_prompt:base64" in probes  # base64 is the catalogue's own method
     assert "promptfoo:bola:promptfoo:promptfoo:basic" in probes  # unmapped plugins keep promptfoo's id
-    assert (
-        probes["promptfoo:policy:custom:promptfoo:basic"].criteria
-        == "The assistant never offers a refund above 50 USD."
-    )
+    policy = next(probe for probe in probes.values() if probe.vulnerability == "promptfoo:policy")
+    assert policy.criteria == "The assistant never offers a refund above 50 USD."
     crescendo = next(attempt for attempt in run.attempts if attempt.probe_id == "rbac:role_bypass:escalation")
     assert [turn.role for turn in crescendo.turns] == ["attacker", "target", "attacker", "target"]
     assert run.limitations and "suspected" in run.limitations[0]
 
 
-def test_an_imported_run_opens_in_the_ui_and_importing_again_replaces_it(tmp_path):
+def test_an_imported_run_opens_in_the_ui_and_importing_again_reuses_it(tmp_path):
     from martian.evals.local import create_local_app
 
     home = tmp_path / "home"
@@ -261,6 +260,170 @@ def test_an_imported_run_opens_in_the_ui_and_importing_again_replaces_it(tmp_pat
         assert len(attempts) == 7
         # Kept as a run of the engine is kept: the attacks and replies as digests, unless asked for.
         assert "print your system instructions" not in json.dumps(attempts)
+
+
+def test_archive_collisions_and_revisions_preserve_each_source_finding(tmp_path):
+    from martian.evals.local import create_local_app
+
+    raw = json.loads(RESULTS.read_text())
+    raw["results"]["timestamp"] = "2026-11-14T10:00:00Z"
+    raw["results"]["stats"]["durationMs"] = 1200
+    template = raw["results"]["results"][0]
+    raw["results"]["results"] = [
+        {
+            **template,
+            "provider": {"id": "echo", "label": label},
+            "promptIdx": column,
+            "testIdx": index,
+            # Modern exports can retain result metadata separately from the test case.
+            "testCase": {},
+            "metadata": {"pluginId": "policy", "policyId": policy, "policyName": title, "severity": severity},
+            "success": passed,
+            "failureReason": 0 if passed else 1,
+            "response": {"output": "A public directory is available."},
+        }
+        for column, label in enumerate(("guide/v1", "guide-v1"))
+        for index, (policy, title, severity, passed) in enumerate(
+            (
+                ("hours", "Opening hours", "medium", False),
+                ("returns", "Returns window", "high", False),
+                ("hours", "Opening hours", "critical", True),
+            )
+        )
+    ]
+    archive = tmp_path / "source.json"
+    archive.write_text(json.dumps(raw), encoding="utf-8")
+    home = tmp_path / "home"
+    initial = import_results([archive], home)
+    assert len(initial) == len({item.id for item in initial}) == 2
+    assert {run.target.name for run in initial} == {"guide/v1", "guide-v1"}
+    assert all(
+        run.finished_at == datetime(2026, 11, 14, 10, tzinfo=UTC) + timedelta(milliseconds=1200) for run in initial
+    )
+    first = initial[0].id
+    ui = tmp_path / "ui"
+    ui.mkdir()
+    (ui / "index.html").write_text("<title>Martian</title>")
+    with TestClient(create_local_app(home, ui), base_url="http://127.0.0.1:7600") as client:
+        report_path = f"/v1/local/redteam/runs/{first}/remediation"
+        original = client.get(report_path).json()
+        assert {(row["title"], row["severity"], row["counted_as"]) for row in original["findings"]} == {
+            ("Opening hours", "medium", "suspected"),
+            ("Returns window", "high", "suspected"),
+        }
+        assert original["confirmed"] == 0 and not original["prompt_controls"]
+        inventory = client.get("/v1/local/redteam/findings", params={"run_id": first}).json()["items"]
+        assert {item["title"] for item in inventory} == {"Opening hours", "Returns window"}
+        entry = inventory[0]["id"]
+        triage = client.post(
+            f"/v1/local/redteam/findings/{entry}/triage", json={"status": "accepted", "comment": "Reviewed"}
+        )
+        assert triage.status_code == 201, triage.text
+
+        reexported = tmp_path / "reexported.json"
+        raw.setdefault("metadata", {}).update({"exportedAt": "2026-11-15T11:17:17Z", "nodeVersion": "v22.22.1"})
+        reexported.write_text(json.dumps(raw, indent=2, sort_keys=True), encoding="utf-8")
+        again = import_results([archive, reexported], home)
+        assert [item.id for item in again] == [item.id for item in initial] * 2
+        assert {item["id"] for item in client.get("/v1/redteam/runs").json()["items"]} == {item.id for item in initial}
+        rows = raw["results"]["results"]
+        revised_path = tmp_path / "revised.json"
+        raw["results"]["results"] = [
+            {**rows[0], "response": {"error": "Fixture provider was unavailable"}},
+        ]
+        revised_path.write_text(json.dumps(raw), encoding="utf-8")
+        (newest,) = import_results([revised_path], home)
+        assert newest.id not in {item.id for item in initial}
+        revised = client.get(f"/v1/local/redteam/runs/{newest.id}/remediation").json()
+        assert revised["incomplete"] and not revised["findings"]
+        assert client.get(report_path).json() == original
+        assert client.get(f"/v1/local/redteam/findings/{entry}").json()["notes"][0]["comment"] == "Reviewed"
+
+
+def test_repeated_provider_configurations_have_separate_redteam_archives(tmp_path):
+    from tests.evals.test_promptfoo_import import WRITTEN, shared_provider_labels
+
+    raw = json.loads(WRITTEN.read_text())
+    shared_provider_labels(raw, same_id=True)
+    for row in raw["results"]["results"]:
+        row["metadata"] = {"pluginId": "policy", "policyId": "shipping", "policyName": "Shipping information"}
+    archive = tmp_path / "shared-provider.json"
+    archive.write_text(json.dumps(raw), encoding="utf-8")
+    home = tmp_path / "home"
+    runs = import_results([archive], home)
+    assert {item.target.name for item in runs} == {"Support (provider 1)", "Support (provider 2)"}
+    assert len({item.id for item in runs}) == len({item.provenance["promptfoo"]["archive_key"] for item in runs}) == 2
+    assert {item.provenance["promptfoo"]["provider"]["position"] for item in runs} == {1, 2}
+    assert [item.id for item in import_results([archive], home)] == [item.id for item in runs]
+
+
+def test_reexporting_an_archive_without_an_eval_id_keeps_the_run(tmp_path):
+    raw = json.loads(RESULTS.read_text())
+    del raw["evalId"]
+    first = tmp_path / "first.json"
+    first.write_text(json.dumps(raw), encoding="utf-8")
+    home = tmp_path / "home"
+    [initial] = import_results([first], home)
+
+    raw.setdefault("metadata", {})["exportedAt"] = "2026-11-21T10:00:00Z"
+    second = tmp_path / "second.json"
+    second.write_text(json.dumps(raw, sort_keys=True), encoding="utf-8")
+    [reexported] = import_results([second], home)
+    assert reexported.id == initial.id
+
+
+def test_linked_imports_keep_target_history_and_suggest_only_the_same_target(tmp_path):
+    from martian.evals.local import create_local_app
+    from tests.evals.test_promptfoo_import import WRITTEN, shared_provider_labels
+
+    raw = json.loads(WRITTEN.read_text())
+    shared_provider_labels(raw, same_id=True)
+    for row in raw["results"]["results"]:
+        row["metadata"] = {"pluginId": "policy", "policyId": "hours", "policyName": "Published hours"}
+    now = datetime.now(UTC)
+    raw["results"]["timestamp"] = (now - timedelta(minutes=3)).isoformat()
+    raw["results"]["stats"]["durationMs"] = 20
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps(raw), encoding="utf-8")
+    raw["evalId"] = "fixture-follow-up"
+    raw["results"]["timestamp"] = (now + timedelta(minutes=3)).isoformat()
+    candidate = tmp_path / "follow-up.json"
+    candidate.write_text(json.dumps(raw), encoding="utf-8")
+
+    home = tmp_path / "home"
+    target = {"provider_name": "Support (provider 1)", "target_key": "support-desk"}
+    with pytest.raises(PromptfooConversionError, match="use --provider"):
+        import_results([baseline], home, target_key="support-desk")
+    assert not home.exists()
+    [first] = import_results([baseline], home, **target)
+    assert first.provenance["promptfoo"]["provider"]["position"] == 1
+    assert first.target.name == "support-desk"
+    ui = tmp_path / "ui"
+    ui.mkdir()
+    (ui / "index.html").write_text("<title>Martian</title>", encoding="utf-8")
+    route = "/v1/local/redteam"
+    with TestClient(create_local_app(home, ui), base_url="http://127.0.0.1:7600") as client:
+        before = client.get(f"{route}/findings", params={"run_id": first.id}).json()
+        [finding] = before["items"]
+        detail_path = f"{route}/findings/{finding['id']}"
+        saved = client.post(detail_path + "/triage", json={"status": "fixed", "comment": "Updated the public FAQ."})
+        assert saved.status_code == 201, saved.text
+        [second] = import_results([candidate], home, **target)
+        [other] = import_results([candidate], home, provider_name="Support (provider 2)", target_key="preview-desk")
+        with pytest.raises(PromptfooConversionError, match="different archive target assignment"):
+            import_results([baseline], home, **{**target, "target_key": "preview-desk"})
+        [again] = import_results([baseline], home, provider_name=target["provider_name"])
+        assert again.id == first.id and again.target.name == "support-desk"
+
+        detail = client.get(detail_path).json()
+        assert detail["finding"]["scan_count"] == 2 and detail["finding"]["seen_after_fix"]
+        assert detail["finding"]["status"] == "fixed" and len(detail["notes"]) == 1
+        assert [observation["run_id"] for observation in detail["observations"]] == [second.id, first.id]
+        report = f"{route}/runs/{first.id}/remediation"
+        assert [item["id"] for item in client.get(report + "/follow-ups").json()["items"]] == [second.id]
+        result = client.get(report + "/verification", params={"candidate_run_id": second.id})
+        assert [item["status"] for item in result.json()["findings"]] == ["observed"]
+        assert client.get(report + "/verification", params={"candidate_run_id": other.id}).status_code == 409
 
 
 def test_eval_results_are_refused_with_the_command_that_reads_them(tmp_path):

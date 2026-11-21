@@ -320,7 +320,24 @@ def test_a_conversation_case_is_paired_by_its_turns_and_a_check_s_default_scope_
     assert first["cases"][0]["digest"] != second["cases"][0]["digest"]
     # The default scope is left out of a check's digest, and so is the panel of a check without
     # one, so a baseline from before scopes and panels pairs.
-    check = suite.checks[0].model_dump(mode="json", exclude={"combine", "scope", "panel", "options"})
+    check = suite.checks[0].model_dump(
+        mode="json",
+        exclude={
+            "combine",
+            "scope",
+            "panel",
+            "options",
+            "case_mapping",
+            "max_edits",
+            "min_words",
+            "max_words",
+            "plain_json",
+            "embedded",
+            "negate",
+            "score_threshold",
+            "judge_prompt",
+        },
+    )
     assert first["checks"]["short"] == baseline.digest({"check": check, "judge": None, "combine": None})
 
 
@@ -350,7 +367,24 @@ def test_an_installed_check_s_options_are_in_its_digest_and_a_check_without_them
     # fingerprint), as it had before installed checks existed.
     assert first["short"] == second["short"]
     short = CheckSpec(type="length", name="short", max_length=10)
-    kept = short.model_dump(mode="json", exclude={"combine", "scope", "panel", "options"})
+    kept = short.model_dump(
+        mode="json",
+        exclude={
+            "combine",
+            "scope",
+            "panel",
+            "options",
+            "case_mapping",
+            "max_edits",
+            "min_words",
+            "max_words",
+            "plain_json",
+            "embedded",
+            "negate",
+            "score_threshold",
+            "judge_prompt",
+        },
+    )
     assert first["short"] == baseline.digest({"check": kept, "judge": None, "combine": None})
 
 

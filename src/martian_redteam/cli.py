@@ -6,6 +6,7 @@ import asyncio
 import json
 from collections import Counter
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Annotated, Any, NoReturn
 from uuid import uuid4
 
@@ -523,14 +524,33 @@ def report_command(
     run_file: Annotated[
         Path | None, typer.Option("--run-file", help="The run file, which SARIF results point at.")
     ] = None,
+    remediation: Annotated[
+        bool,
+        typer.Option(
+            "--remediation",
+            help="Include the offline remediation plan with selected formats. Finished scans include it by default.",
+        ),
+    ] = False,
+    pdf: Annotated[bool, typer.Option("--pdf", help="Include a review PDF with findings and remediation.")] = False,
+    project_id: Annotated[str, typer.Option(help="Project to read stored runs from.")] = "default",
 ) -> None:
     """Write a version 2 run's reports again, in other formats: redteam-report.json and .md, and each format."""
-    from martian.redteam.engine.report import MARKDOWN_NAME, REPORT_NAME, for_report
     from martian.redteam.report import build_report, render_markdown
+    from martian.redteam.report.files import MARKDOWN_NAME, REPORT_NAME, for_report
     from martian.redteam.report.outputs import write_formats
+    from martian.redteam.report.remediation import write_remediation_reports
 
     chosen = _formats(formats or ["all"])
-    found, folder = _load_run(run)
+    found, folder = _load_run(run, project_id=project_id)
+    if (remediation or pdf) and found.state in ("queued", "running"):
+        _stop("Remediation and PDF reports are available when this scan finishes.")
+    pdf_report: tuple[str, bytes] | None = None
+    if pdf:
+        try:
+            from martian.redteam.report.pdf import PDF_NAME, render_scan_pdf
+        except ImportError:
+            _stop("PDF reports require martian-sdk[evals].")
+        pdf_report = (PDF_NAME, render_scan_pdf(found))
     destination = output or folder
     copy = for_report(found)
     standard = build_report(copy)
@@ -540,10 +560,23 @@ def report_command(
     shown = _shown_path(run_file) if run_file is not None else None
     written = write_formats(copy, standard, destination, chosen, run_file=shown)
     names = [REPORT_NAME, MARKDOWN_NAME, *(item.name for item in written)]
+    if remediation or not formats:
+        names.extend(path.name for path in write_remediation_reports(copy, destination))
+    if pdf_report is not None:
+        name, content = pdf_report
+        try:
+            with TemporaryDirectory(dir=destination, prefix=".scan-report-") as staging:
+                staged = Path(staging) / name
+                staged.write_bytes(content)
+                staged.chmod(0o600)
+                staged.replace(destination / name)
+        except OSError as error:
+            _stop(f"Could not write the scan PDF. {safe_text(error.strerror)}")
+        names.append(name)
     console.print(f"Wrote {', '.join(names)} to {destination}", markup=False)
 
 
-def _load_run(run: str) -> tuple[Any, Path]:
+def _load_run(run: str, *, project_id: str = "default") -> tuple[Any, Path]:
     """The run ``run`` names, a ``redteam-run.json`` or a run id in the local store, and the folder
     its reports go to by default: the file's folder, else ``results``."""
     from martian.redteam.model import RedteamRun
@@ -554,10 +587,10 @@ def _load_run(run: str) -> tuple[Any, Path]:
             return RedteamRun.model_validate_json(path.read_text(encoding="utf-8")), path.parent
         except (OSError, ValueError):
             _stop(f"{safe_text(path)} is not a red team run (redteam-run.json).")
-    return _stored_run(run), Path("results")
+    return _stored_run(run, project_id=project_id), Path("results")
 
 
-def _stored_run(run_id: str) -> Any:
+def _stored_run(run_id: str, *, project_id: str = "default") -> Any:
     """The run ``run_id`` from the local store; stops when it is not there."""
     try:
         from martian.redteam.store import RedteamStore
@@ -565,7 +598,7 @@ def _stored_run(run_id: str) -> Any:
         _stop("Reading a run from the local store needs martian-sdk[evals]; or give a redteam-run.json.")
     keeper = RedteamStore.local()
     try:
-        found = asyncio.run(keeper.get("default", run_id))
+        found = asyncio.run(keeper.get(project_id, run_id))
     finally:
         keeper.close()
     if found is None:
@@ -706,6 +739,123 @@ def compare_command(
     console.print(text, markup=False, highlight=False)
     for warning in comparison.warnings:
         errors.print("Not comparable: " + safe_text(warning), style="yellow", markup=False, soft_wrap=True)
+
+
+@app.command("harden-prompt")
+def harden_prompt_command(
+    run: Annotated[str, typer.Argument(help="A redteam-run.json, or the id of a run in the local store.")],
+    prompt: Annotated[Path, typer.Argument(help="The current system prompt as a UTF-8 text file.")],
+    output: Annotated[Path, typer.Option("-o", "--output", help="A new file for the candidate prompt.")],
+    control: Annotated[
+        list[str] | None,
+        typer.Option("--control", help="A prompt control ID from the remediation report. Repeat to select several."),
+    ] = None,
+    project_id: Annotated[str, typer.Option(help="Project to read stored runs from.")] = "default",
+) -> None:
+    """Draft a system prompt with instructions suggested by a saved scan."""
+    from martian.redteam.prompt_hardening import append_controls, prompt_controls
+
+    found, _ = _load_run(run, project_id=project_id)
+    if found.state in ("queued", "running"):
+        _stop("Prompt hardening is available when this scan finishes.")
+    available = prompt_controls(found.findings)
+    if not available:
+        _stop("This scan has no confirmed findings with system prompt recommendations.")
+    if control and set(control) - {item.id for item in available}:
+        _stop("Choose prompt controls listed in this scan's remediation report.")
+    selected = [item for item in available if not control or item.id in control]
+    try:
+        original = prompt.read_bytes().decode("utf-8")
+    except (OSError, UnicodeError):
+        _stop("Could not read the system prompt as UTF-8. Check the file and its permissions.")
+    if not original.strip():
+        _stop("Provide the current system prompt.")
+    candidate = append_controls(original, selected)
+    try:
+        with TemporaryDirectory(dir=output.parent, prefix=".harden-prompt-") as staging:
+            staged = Path(staging) / "candidate.txt"
+            staged.write_bytes(candidate.encode("utf-8"))
+            staged.chmod(0o600)
+            output.hardlink_to(staged)
+    except FileExistsError:
+        _stop("The output file already exists. Choose a new path.")
+    except OSError as error:
+        _stop(f"Could not write the candidate prompt. {safe_text(error.strerror)}")
+    console.print(f"Wrote candidate prompt to {safe_text(output)}. Review it before applying.", markup=False)
+
+
+@app.command("verify-remediation")
+def verify_remediation_command(
+    baseline: Annotated[str, typer.Argument(help="The baseline scan: a redteam-run.json or a run id.")],
+    candidate: Annotated[str, typer.Argument(help="The follow-up scan: a redteam-run.json or a run id.")],
+    project_id: Annotated[str, typer.Option(help="Project to read stored runs from.")] = "default",
+    output: Annotated[
+        Path | None,
+        typer.Option("-o", "--output", help="Folder for redteam-remediation-verification.json."),
+    ] = None,
+    fail_on_regression: Annotated[
+        bool,
+        typer.Option(help="Require matching coverage and fail on recurrence or new or escalated confirmed findings."),
+    ] = False,
+) -> None:
+    """Check whether findings recur, using the recorded coverage of two saved scans."""
+    from martian.redteam.report.verification import VERIFICATION_FILENAME, VerificationError, verify_remediation
+
+    before, _ = _load_run(baseline, project_id=project_id)
+    after, _ = _load_run(candidate, project_id=project_id)
+    try:
+        comparison = verify_remediation(before, after)
+    except VerificationError as error:
+        _stop(str(error))
+    if output is not None:
+        destination = output / VERIFICATION_FILENAME
+        try:
+            output.mkdir(parents=True, exist_ok=True)
+            with TemporaryDirectory(dir=output, prefix=".verification-") as staging:
+                staged = Path(staging) / VERIFICATION_FILENAME
+                staged.write_text(comparison.model_dump_json(indent=2) + "\n", encoding="utf-8")
+                staged.replace(destination)
+        except OSError as error:
+            _stop(f"Could not write {safe_text(destination)}. {safe_text(error.strerror)}")
+    for name, summary in (("Baseline", comparison.baseline_summary), ("Follow-up", comparison.candidate_summary)):
+        risk = summary.overall_risk or ("unrated" if summary.confirmed else "none recorded")
+        console.print(
+            f"{name} · {summary.confirmed} confirmed · {summary.attempted} attempted · {summary.suspected} suspected · "
+            f"Highest confirmed severity {risk.capitalize()}",
+            markup=False,
+            highlight=False,
+        )
+    coverage = comparison.coverage
+    console.print(
+        f"{coverage.matched_probes} of {coverage.baseline_probes} baseline probes matched. "
+        f"Follow-up recorded {coverage.candidate_probes} probes.",
+        markup=False,
+    )
+    if coverage.reason:
+        console.print(f"Limited comparison coverage. {coverage.reason}", markup=False)
+    labels = {"observed": "Still observed", "not_observed": "Not observed", "inconclusive": "Inconclusive"}
+    for row in comparison.findings:
+        console.print(
+            f"{safe_text(row.probe_id)} · {labels[row.status]} · "
+            f"{row.decided_attempts}/{row.planned_attempts} planned attempts decided. {row.reason}",
+            markup=False,
+            highlight=False,
+        )
+    changes = {"new": "New in follow-up", "newly_confirmed": "Newly confirmed", "higher_severity": "Higher severity"}
+    for finding in comparison.follow_up_findings:
+        console.print(
+            f"{safe_text(finding.title)} · {changes[finding.change]} · "
+            f"{finding.counted_as} · {finding.severity or 'unrated'}",
+            markup=False,
+            highlight=False,
+        )
+    if not comparison.findings and not fail_on_regression:
+        _stop("The baseline has no findings to verify.")
+    statuses = {row.status for row in comparison.findings}
+    if "inconclusive" in statuses or (fail_on_regression and coverage.reason):
+        raise typer.Exit(code=2)
+    regressions = fail_on_regression and any(row.counted_as == "confirmed" for row in comparison.follow_up_findings)
+    raise typer.Exit(code=1 if "observed" in statuses or regressions else 0)
 
 
 pin_app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -1100,13 +1250,15 @@ def _form_checks(form: Any) -> str:
     return " + ".join(kinds)
 
 
-def _register_interop() -> None:
+def _register_subcommands() -> None:
+    from martian.redteam.findings_cli import app as findings_app
     from martian.redteam.interop.cli import register
 
     register(app)
+    app.add_typer(findings_app, name="findings")
 
 
-_register_interop()
+_register_subcommands()
 
 if __name__ == "__main__":
     app()

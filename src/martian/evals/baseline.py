@@ -72,10 +72,12 @@ PLAIN_REASONS = frozenset(
         "starts_with",
         "ends_with",
         "similarity",
+        "levenshtein",
         "matches",
         "not_matches",
         "is_json",
         "length",
+        "word_count",
         "latency",
         "cost",
         "no_prohibited_phrases",
@@ -131,7 +133,11 @@ def digest(value: Any) -> str:
 
 
 def case_digest(
-    inputs: Mapping[str, Any], expectations: Mapping[str, Any], conversation: Mapping[str, Any] | None = None
+    inputs: Mapping[str, Any],
+    expectations: Mapping[str, Any],
+    conversation: Mapping[str, Any] | None = None,
+    *,
+    gate: str | None = None,
 ) -> str:
     """What makes two runs' results of a case a pair: its inputs and expectations, not its reply,
     and a conversation case's ``turns`` or ``simulated_user`` (``conversation``). A case of one
@@ -139,6 +145,8 @@ def case_digest(
     found: dict[str, Any] = {"inputs": inputs, "expectations": expectations}
     if conversation:
         found["conversation"] = conversation
+    if gate is not None:
+        found["case_gate"] = gate
     return digest(found)
 
 

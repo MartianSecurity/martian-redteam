@@ -99,6 +99,18 @@ def test_a_turn_check_passes_the_conversation_only_when_it_passed_every_turn_it_
     assert open_["passed"] is E and open_["error"].startswith("the turns without a verdict leave it open")
 
 
+def test_a_scored_turn_check_needs_every_grade_for_the_conversation():
+    turns = {
+        1: {"checks": {"clarity": {"passed": True, "value": 0.875}}},
+        2: {"checks": {"clarity": {"passed": False, "value": 0.375}}},
+        3: {"checks": {"clarity": {"passed": None, "value": None}}},
+    }
+    complete = over_turns("clarity", [1, 2], turns)
+    assert (complete["value"], complete["passed"]) == (0.625, False)
+    incomplete = over_turns("clarity", [1, 2, 3], turns)
+    assert (incomplete["value"], incomplete["passed"]) == (None, None)
+
+
 def test_a_conversation_has_no_verdict_when_a_turn_did_not_complete():
     sent = [{"number": 1, "passed": T, "checks": {"answers": {"passed": T}}, "output": "Hi", "error": None}]
     broken = [*sent, {"number": 2, "passed": E, "checks": {}, "output": None, "error": "the target call failed"}]
@@ -231,7 +243,8 @@ def test_a_resumed_run_reuses_a_conversation_until_its_turns_change(tmp_path):
     (tmp_path / "cases.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     messages: list[str] = []
     changed = run_suite(path, progress=messages.append)
-    assert changed["invalidated"] == 1 and messages[0].startswith("2 cases, 1 already done")
+    assert changed["invalidated"] == 1
+    assert any(message.startswith("2 cases, 1 already done") for message in messages)
 
 
 # ---------- targets that keep the conversation ----------

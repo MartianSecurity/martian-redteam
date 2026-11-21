@@ -45,6 +45,7 @@ from martian.redteam._mcp import HeldClient, every_tool, schema_digest
 from martian.redteam.runfile import McpTarget
 from martian.redteam.targets import TargetChanged, TargetReply
 from martian.redteam.targets.conversations import Conversations
+from martian.redteam.targets.identity import endpoint_identity
 from martian.redteam.targets.reply import read_path, reply_text, tool_calls
 
 UNREACHABLE = "the MCP target could not be reached: {kind}; check target.mcp"
@@ -67,6 +68,11 @@ class McpServerTarget:
         self._timeout = timeout_seconds
         self._base = base
         self._url = _from_environment(config.url, "target.mcp.url", environ) if config.url is not None else None
+        self.findings_key, self.name = (
+            endpoint_identity(self.kind, self._url, config.tool, has_headers=bool(config.headers))
+            if self._url
+            else ("", config.tool)
+        )
         self._headers = {
             name: _from_environment(value, f"target.mcp.headers.{name}", environ)
             for name, value in config.headers.items()

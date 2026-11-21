@@ -328,7 +328,7 @@ def http_call(
                 response = await client.post(url, headers=headers, json=body)
         except httpx.HTTPError as error:
             raise _unreachable(error) from None
-        return TargetReply(_reply(response, steps), response_model(response, target, model_steps))
+        return TargetReply(_reply(response, steps, target.response_mode), response_model(response, target, model_steps))
 
     return call
 

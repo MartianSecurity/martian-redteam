@@ -65,7 +65,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from martian.evals import local_runs, local_targets
+from martian.evals import local_media, local_runs, local_targets
 from martian.evals.judge_settings import FileJudgeSettings
 from martian.evals.model import Project
 from martian.evals.outbox import run_deliveries
@@ -291,6 +291,7 @@ def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS,
     judge_settings = FileJudgeSettings(home / SETTINGS_FILE)
     worker = local_runs.LocalWorker(home, records, targets, judge_settings, concurrency=concurrency)
     from martian.redteam.engine.launcher import LocalLauncher
+    from martian.redteam.server import findings as local_findings
     from martian.redteam.server import local as local_redteam
 
     # Red team runs started from the UI run in this process; a run file's relative file is read
@@ -324,7 +325,9 @@ def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS,
     app.include_router(session_router)
     app.include_router(local_targets.router)
     app.include_router(local_runs.router)
+    app.include_router(local_media.router)
     app.include_router(local_redteam.router)
+    app.include_router(local_findings.router)
     app.mount("/", UiFiles(directory=ui, html=True), name="ui")
     app.add_middleware(_BrowserWrites)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(hosts))

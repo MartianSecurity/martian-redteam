@@ -223,7 +223,9 @@ def test_resume_and_repeats_work_per_combination(tmp_path):
     for entry in first["combinations"]:
         assert entry["summary"]["repeats"]["attempts"] == 2
         assert entry["summary"]["reliability"]["pass_rate"] == entry["summary"]["pass_rate"]
-    assert said[0] == "4 combinations of model and prompt"
+    reason = first["combinations"][0]["summary"]["target_isolation"]["reason"]
+    warning = [f"{reason}: the target can read the suite file, its data and its results"] if reason else []
+    assert said[: len(warning) + 1] == [*warning, "4 combinations of model and prompt"]
     assert f"{COMBINATIONS[0]} (1 of 4): 6 cases of 2 attempts each, 0 already done" in said
 
     # Run again: every combination's cases are reused from its own folder.
@@ -331,7 +333,11 @@ def test_each_combination_is_compared_with_the_same_combination_of_the_baseline(
     assert {entry["comparison"] is None for entry in alone["combinations"]} == {True}
     without = compared_suite(tmp_path / "unmatrixed", models=())
     plain = invoke(without, "--output", str(tmp_path / "unmatrixed-out"), "--baseline", str(tmp_path / "main"))
-    assert plain.exit_code == 1 and "it holds no result of this suite, so it is gated on its own" in plain.output
+    assert plain.exit_code == 1
+    assert (
+        f"Compared with {tmp_path / 'main'}: it holds no result of this suite, so it is gated on its own"
+        in plain.output
+    )
     assert not (tmp_path / "unmatrixed-out" / baseline.COMPARISON).exists()
 
 

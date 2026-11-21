@@ -67,9 +67,17 @@ def prepare(scorers: list[ScorerVersion]) -> dict[str, Prepared]:
 def recorded_call(result: CaseResult) -> Any:
     """The call a case's result records, as the checks that measure a call read it: how long it took,
     and no token usage or cost, which the worker does not record."""
-    duration = result.latency_ms
+    return measurement_trace(result.latency_ms)
+
+
+def measurement_trace(latency_ms: float | None, *, tokens: int | None = None, cost_usd: float | None = None) -> Any:
+    """The recorded call fields a latency or cost check reads."""
     return SimpleNamespace(
-        info=SimpleNamespace(execution_duration=duration, token_usage=None, cost=None),
+        info=SimpleNamespace(
+            execution_duration=latency_ms,
+            token_usage=None if tokens is None else {"total_tokens": tokens},
+            cost=None if cost_usd is None else {"total_cost": cost_usd},
+        ),
         data=SimpleNamespace(spans=[SimpleNamespace(name="target", span_type="AGENT")]),
     )
 
@@ -77,13 +85,18 @@ def recorded_call(result: CaseResult) -> Any:
 async def check_score(scorer: ScorerVersion, prepared: Prepared, result: CaseResult) -> tuple[Value, str, str]:
     """One check's value, reason and error for one saved output. A tool-call check with no source reads the
     reply, because the output was saved rather than produced by a call this scoring job saw."""
+    call = recorded_call(result) if scorer.type in ("latency", "cost") else None
+    return await score_output(prepared, result.output, dict(result.expectations), call)
+
+
+async def score_output(
+    prepared: Prepared, output: Any, expectations: dict[str, Any], trace: Any = None
+) -> tuple[Value, str, str]:
+    """Apply a prepared deterministic check to one response and its recorded measurements."""
     if prepared.scorer is None:
         return None, "", prepared.error
-    call = recorded_call(result) if scorer.type in ("latency", "cost") else None
     try:
-        found = await asyncio.to_thread(
-            prepared.scorer.run, outputs=result.output, expectations=dict(result.expectations), trace=call
-        )
+        found = await asyncio.to_thread(prepared.scorer.run, outputs=output, expectations=expectations, trace=trace)
     except Exception as failure:  # noqa: BLE001 - a check that raises is that score's error, whatever it raised
         return None, "", str(failure)[:ERROR_LENGTH]
     if found.error is not None:
@@ -92,4 +105,4 @@ async def check_score(scorer: ScorerVersion, prepared: Prepared, result: CaseRes
     return (value if isinstance(value, bool | int | float | str) else None), str(found.rationale or ""), ""
 
 
-__all__ = ["Prepared", "check_score", "is_check", "prepare", "recorded_call"]
+__all__ = ["Prepared", "check_score", "is_check", "measurement_trace", "prepare", "recorded_call", "score_output"]

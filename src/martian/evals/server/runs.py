@@ -23,6 +23,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query
 
+from martian.evals._promptfoo_comparison import promptfoo_mismatch
 from martian.evals.model import CaseResult, Project, ReviewQueue, Run, Score, ScoringJob, Trace
 from martian.evals.records import RecordStore
 from martian.evals.server.blind import (
@@ -44,6 +45,7 @@ from martian.evals.server.projection import (
     agent_of,
     attempts_out,
     conversation_out,
+    dataset_identity,
     item_out,
     job_config,
     mlflow_assessment,
@@ -231,9 +233,24 @@ async def compare(
 ) -> dict[str, Any]:
     baseline = await find_run(store, records, principal, baseline_id)
     candidate = await find_run(store, records, principal, candidate_id)
-    left_items = [item_out(r) for r in await run_results(records, principal, baseline)]
-    right_items = [item_out(r) for r in await run_results(records, principal, candidate)]
-    result = compare_runs(baseline, left_items, candidate, right_items)
+    left_results = await run_results(records, principal, baseline)
+    right_results = await run_results(records, principal, candidate)
+    left_items = [item_out(row) for row in left_results]
+    right_items = [item_out(row) for row in right_results]
+    check_migration = (
+        principal.kind == "single_user"
+        and baseline_job_id is None
+        and candidate_job_id is None
+        and baseline.state == candidate.state == "completed"
+        and dataset_identity(baseline) != dataset_identity(candidate)
+        and bool(baseline.provenance.get("promptfoo") or candidate.provenance.get("promptfoo"))
+    )
+    mismatch = promptfoo_mismatch(baseline, left_results, candidate, right_results) if check_migration else None
+    result = compare_runs(
+        baseline, left_items, candidate, right_items, verified_promptfoo=check_migration and mismatch is None
+    )
+    if mismatch is not None:
+        result["reason"] = mismatch
     if bool(baseline_job_id) != bool(candidate_job_id):
         raise HTTPException(422, "Choose both scoring jobs")
     if baseline_job_id is None or candidate_job_id is None:
@@ -407,8 +424,23 @@ async def workbench(
             raise HTTPException(404, "Not found")
         if all(q.id != queue.id for q in queues):
             queues.insert(0, queue)
+
+    jobs_out = {job.id: public_job(job) for job in job_rows}
+    if selected and selected.id not in jobs_out:
+        jobs_out[selected.id] = public_job(selected)
+    suite_names: dict[tuple[str, int], str | None] = {}
+    for job in jobs_out.values():
+        pinned = job["config"]
+        if "suite_id" not in pinned:
+            continue
+        key = pinned["suite_id"], pinned["suite_version"]
+        if key not in suite_names:
+            suite = await records.get_suite(principal, DEFAULT_PROJECT, key[0], version=key[1])
+            suite_names[key] = suite.name if suite else None
+        if suite_names[key] is not None:
+            pinned["suite_name"] = suite_names[key]
     return {
-        "jobs": [public_job(j) for j in job_rows],
+        "jobs": [jobs_out[job.id] for job in job_rows],
         "assessments": [s.public() for s in score_rows],
         "reviews": [r.public() for r in review_rows],
         "latest_reviews": [r.public() for r in latest_reviews[:800]],
@@ -422,7 +454,7 @@ async def workbench(
             }
         ],
         "queues": [queue_with(q, blind) for q in queues],
-        "selected_job": public_job(selected) if selected else None,
+        "selected_job": jobs_out[selected.id] if selected else None,
         "pagination": {"jobs": jobs_pagination, "assessments": scores_pagination, "reviews": reviews_pagination},
         "truncated": False,
         "scorecard": scorecard(items, selected_scores, config) if config else None,

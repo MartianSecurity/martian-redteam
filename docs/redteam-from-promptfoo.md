@@ -32,7 +32,8 @@ need not be installed. Every mapping is listed in [red team interop](redteam-int
   `citation`, `jailbreak:tree` (as `TreeSearch`), `crescendo` (as `Escalation`) and `best-of-n` (as
   `Mutation`); `numTests` and `maxConcurrency`.
 - **Results import** (`martian redteam import promptfoo`) as runs in the local store that `martian ui`
-  opens. Every hit stays suspected: promptfoo's grader is a model that read the reply.
+  opens. Archived verdicts become suspected findings, and named policies appear individually
+  in Findings and Remediation Reports.
 - **Not converted, and listed with the reason** in the command's output and at the top of the run
   file: plugins with no vulnerability in the catalogue (such as `bola`), dataset plugins, `intent`,
   promptfoo's service-run strategies (`jailbreak:meta`, `jailbreak:composite`, `goat`,

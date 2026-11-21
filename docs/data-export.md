@@ -43,7 +43,9 @@ time, which a run's `provenance.prompts` names; and every project the store list
   manifest that pins the version publishing wrote, and any publication that never finished;
 - its suites, every version; its dataset drafts with their cases; its saved views;
 - its runs as the record store holds them and as the store holds them, each with its case
-  results, scores, scoring jobs, every review of every chain (replaced ones too) with whether it
+  results, [named metrics](evals.md#named-metrics), [derived metrics](evals.md#derived-metrics),
+  scores, scoring jobs, every review of every
+  chain (replaced ones too) with whether it
   was given blind, the review queues its reviews name with each item's status, which of them have
   [blind double review](evals.md#blind-double-review), and its artifacts;
 - its traces, oldest first, each with its spans and its scores: judges' and checks' verdicts and
@@ -75,6 +77,8 @@ describe, and what the two stores do not hold:
   parameters and metrics (a run's counts are logged again on import), and MLflow's own form of a
   scorer registered outside Martian (its name and version are kept).
 - CI gate sessions, which stay with the server's CI gate.
+- Red Team scans and triage, which stay in the record database. Use a [triage archive](redteam-findings.md#move-review-history)
+  to move reviews when you already have the matching scans in the destination.
 - What a suite-file run keeps outside the stores: its output folder (`results.jsonl`,
   `summary.json`, `verdicts.json`, the `comparison.json` a `--baseline` comparison writes and a
   matrix's `matrix.json`), which a later `--baseline` reads, and the

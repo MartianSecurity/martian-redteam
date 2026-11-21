@@ -16,7 +16,10 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
+from martian.evals.case_gate import CaseChecks, CaseGate, GateNumber, validate_gates
+from martian.evals.derived_metrics import DerivedMetrics
 from martian.evals.matrix import MatrixAxis, combinations
+from martian.evals.named_metrics import CaseMetric
 
 MODEL_VERSION = "martian-eval-model-v1"
 
@@ -25,6 +28,7 @@ Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 Value = bool | int | float | str | None
 
 TargetKind = Literal["function", "http", "agent", "stored"]
+ResponseMode = Literal["json_or_text"]
 ScorerKind = Literal["llm_judge", "check", "code", "human"]
 DatasetSource = Literal["file", "draft", "global", "upload", "traces"]
 RunSource = Literal["local", "console", "ci"]
@@ -213,8 +217,9 @@ class Target(_Object):
     file: str | None = None
     function: str | None = None
     url: str | None = None
-    body: dict[str, Any] | None = None
+    body: dict[str, Any] | list[Any] | None = None
     response_path: str | None = None
+    response_mode: ResponseMode | None = None
     headers: dict[str, str] = Field(default_factory=dict)
     agent_id: str | None = None
     model_path: str | None = Field(default=None, min_length=1, max_length=200)
@@ -230,6 +235,7 @@ class Target(_Object):
                 "url",
                 "body",
                 "response_path",
+                "response_mode",
                 "headers",
                 "agent_id",
                 "model_path",
@@ -239,7 +245,7 @@ class Target(_Object):
         }
         allowed = {
             "function": {"file", "function"},
-            "http": {"url", "body", "response_path", "headers", "model_path", "model_header"},
+            "http": {"url", "body", "response_path", "response_mode", "headers", "model_path", "model_header"},
             "agent": {"agent_id"},
             "stored": set(),
         }[self.kind]
@@ -256,7 +262,7 @@ class Target(_Object):
     def _without_unset_model_source(self, handler: SerializerFunctionWrapHandler) -> Any:
         written = handler(self)
         if isinstance(written, dict):
-            for name in ("model_path", "model_header"):
+            for name in ("model_path", "model_header", "response_mode"):
                 if written.get(name, "") is None:
                     del written[name]
         return written
@@ -515,6 +521,9 @@ class Suite(_Object):
     policies: list[Policy] = Field(default_factory=list)
     settings: RunSettings = RunSettings()
     repeats: Repeats = Repeats()
+    case_gate: CaseGate | None = None
+    check_sets: list[CaseChecks] = Field(default_factory=list)
+    derived_metrics: DerivedMetrics | None = None
     matrix: dict[str, MatrixAxis] = Field(default_factory=dict)
     simulator: Simulator | None = None
     digest: Digest
@@ -530,6 +539,9 @@ class Suite(_Object):
             raise ValueError(f"policies name scorers the suite does not have: {', '.join(unknown)}")
         if unknown := sorted(set(self.repeats.checks) - set(names)):
             raise ValueError(f"repeats name scorers the suite does not have: {', '.join(unknown)}")
+        metrics = validate_gates(self.case_gate, self.check_sets, names)
+        if self.derived_metrics is not None:
+            self.derived_metrics.validate_measurements(metrics)
         combinations(self.matrix)  # raises for a matrix that cannot run
         return self
 
@@ -539,6 +551,12 @@ class Suite(_Object):
         if isinstance(written, dict):
             if self.repeats == Repeats():
                 written.pop("repeats", None)
+            if self.case_gate is None:
+                written.pop("case_gate", None)
+            if not self.check_sets:
+                written.pop("check_sets", None)
+            if self.derived_metrics is None:
+                written.pop("derived_metrics", None)
             if not self.matrix:
                 written.pop("matrix", None)
             if self.simulator is None:
@@ -601,20 +619,25 @@ class Run(_Object):
 
 
 class CheckVerdict(_Object):
-    """One check's verdict on one attempt. ``passed`` is None when there is no verdict.
+    """One check's verdict on an attempt or turn. ``passed`` is None without a verdict.
+    ``value`` holds an optional numeric grade.
     ``metadata`` is what the check recorded beside its verdict, such as a panel's votes; it is
     left out when empty, so a verdict without any is written as it was before the field existed."""
 
     passed: bool | None = None
+    value: GateNumber | None = None
     rationale: str = ""
     error: str = ""
     metadata: dict[str, str] = Field(default_factory=dict)
 
     @model_serializer(mode="wrap")
-    def _without_empty_metadata(self, handler: SerializerFunctionWrapHandler) -> Any:
+    def _without_unused_fields(self, handler: SerializerFunctionWrapHandler) -> Any:
         written = handler(self)
-        if isinstance(written, dict) and not self.metadata:
-            written.pop("metadata", None)
+        if isinstance(written, dict):
+            if not self.metadata:
+                written.pop("metadata", None)
+            if self.value is None:
+                written.pop("value", None)
         return written
 
 
@@ -655,6 +678,7 @@ class Attempt(_Object):
     number: int = Field(ge=1, le=MAX_ATTEMPTS)
     status: CaseStatus
     checks: dict[str, CheckVerdict] = Field(default_factory=dict)
+    named_metrics: dict[str, CaseMetric] = Field(default_factory=dict)
     output: Any = None
     error: str = ""
     latency_ms: float | None = Field(default=None, ge=0)
@@ -664,7 +688,10 @@ class Attempt(_Object):
 
     @model_serializer(mode="wrap")
     def _without_unused_fields(self, handler: SerializerFunctionWrapHandler) -> Any:
-        return _without_unused_conversation(handler(self), self)
+        written = handler(self)
+        if isinstance(written, dict) and not self.named_metrics:
+            written.pop("named_metrics", None)
+        return _without_unused_conversation(written, self)
 
 
 class CaseResult(_Object):
@@ -696,6 +723,9 @@ class CaseResult(_Object):
     error: str = ""
     latency_ms: float | None = Field(default=None, ge=0)
     fingerprint: Digest | None = None
+    promptfoo_contract: Digest | None = None
+    """The effective inputs and checks of a verified deterministic Promptfoo import."""
+    named_metrics: dict[str, CaseMetric] = Field(default_factory=dict)
     finished_at: datetime | None = None
     store: StoreRef = StoreRef()
     attempts: list[Attempt] = Field(default_factory=list)
@@ -710,6 +740,10 @@ class CaseResult(_Object):
             written.pop("attempts", None)
         if isinstance(written, dict) and not self.simulated:
             written.pop("simulated", None)
+        if isinstance(written, dict) and self.promptfoo_contract is None:
+            written.pop("promptfoo_contract", None)
+        if isinstance(written, dict) and not self.named_metrics:
+            written.pop("named_metrics", None)
         return _without_unused_conversation(written, self)
 
 
@@ -1016,6 +1050,7 @@ RESULTS_RECORD_FIELDS = {
     "session_id": "CaseResult.session_id (only for a conversation case)",
     "turns": "CaseResult.turns (only for a conversation case)",
     "simulated": "CaseResult.simulated (only for a case with a simulated user)",
+    "named_metrics": "CaseResult.named_metrics (only for measured metrics)",
 }
 
 # Every field of one entry of a results.jsonl record's ``attempts``, and where the model keeps it.
@@ -1027,6 +1062,7 @@ ATTEMPT_RECORD_FIELDS = {
     "error": "Attempt.error",
     "session_id": "Attempt.session_id (only for a conversation case)",
     "turns": "Attempt.turns (only for a conversation case)",
+    "named_metrics": "Attempt.named_metrics (only for measured metrics)",
 }
 
 # Every field of one entry of a results.jsonl record's ``turns``, and where the model keeps it.
@@ -1043,6 +1079,7 @@ TURN_RECORD_FIELDS = {
 def _verdict(check: dict[str, Any]) -> CheckVerdict:
     return CheckVerdict(
         passed=check.get("passed"),
+        value=check.get("value"),
         rationale=check.get("rationale") or "",
         error=check.get("error") or "",
         metadata=dict(check.get("metadata") or {}),
@@ -1073,6 +1110,9 @@ def _attempt(entry: dict[str, Any]) -> Attempt:
         error=entry.get("error") or "",
         session_id=entry.get("session_id"),
         turns=[_turn(turn) for turn in entry.get("turns") or []],
+        named_metrics={
+            name: CaseMetric.model_validate(value) for name, value in (entry.get("named_metrics") or {}).items()
+        },
     )
 
 
@@ -1098,6 +1138,9 @@ def from_results_record(
         output=record.get("output"),
         error=record.get("error") or "",
         fingerprint=record.get("fingerprint"),
+        named_metrics={
+            name: CaseMetric.model_validate(value) for name, value in (record.get("named_metrics") or {}).items()
+        },
         attempts=[_attempt(entry) for entry in record.get("attempts") or []],
         session_id=record.get("session_id"),
         turns=[_turn(entry) for entry in record.get("turns") or []],
@@ -1113,7 +1156,7 @@ def from_results_record(
                 scorer=label,
                 scorer_version=scorer.version if scorer else "",
                 source="llm_judge" if scorer and scorer.kind == "llm_judge" else "code",
-                value=check.get("passed"),
+                value=check.get("value", check.get("passed")),
                 passed=check.get("passed"),
                 rationale=check.get("rationale") or "",
                 error=check.get("error") or "",

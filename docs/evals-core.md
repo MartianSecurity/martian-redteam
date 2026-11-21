@@ -240,7 +240,7 @@ version 4 of the server's frozen contract (`contracts/evals-api.json` in Martian
 | `GET /v1/evals/projects` | The default project, then the store's projects by creation time | Store |
 | `GET /v1/evals` | `EvalRunOut` list, newest first; `project_id`, `default_only`, `q`, `page`, `limit` | Records |
 | `GET /v1/evals/{run_id}` | `EvalRunDetailOut`: the run and its case results | Records |
-| `GET /v1/evals/{run_id}/workbench` | Scoring jobs, scores and reviews of the run, the selected job's scorecard, judge calibration | Records; the run's review queues from the store |
+| `GET /v1/evals/{run_id}/workbench` | Scoring jobs with their saved suite version and its name when available, scores and reviews, the selected job's scorecard, judge calibration | Records; the run's review queues from the store |
 | `GET /v1/evals/{run_id}/items/{item_id}/trace` | The case result's trace: spans, usage and MLflow-shaped `annotations` | Store |
 | `GET /v1/evals/{run_id}/provenance` | The run as admitted, as far as its readers see it (`admission`, the run's [provenance](#run-provenance)), and its run in the store (`native`) | Records and store |
 | `GET /v1/evals/compare` | Two runs paired by case, with a significance label; with both scoring jobs, each scorer's change and label and both scorecards | Records |
@@ -429,7 +429,7 @@ routes, and `tests/evals/test_blind_review.py` blind double review: a second rev
 nothing of the first answer through the routes until they answer, the answers given blind, a
 viewer-specific calibration statistics, and the agreement on blind answers.
 `tests/evals/test_read_contract.py` checks each operation and the schemas it uses against a copy
-of the contract (`tests/evals/contracts/evals-api-v5.json`, unchanged from the server; see
+of the contract (`tests/evals/contracts/evals-api-v8.json`, unchanged from the server; see
 `tests/evals/evals_contract.py`) and validates the responses against it, with UUIDs and
 date-times checked.
 
@@ -3898,9 +3898,12 @@ file as runs in the local edition's data folder (`martian.evals.promptfoo_import
 
 ```bash
 martian evals import promptfoo results.json                    # as `promptfoo eval -o results.json` wrote it
-martian evals convert promptfoo promptfooconfig.yaml --target agent.py:answer --output suite
+martian evals import promptfoo results.json --new-id           # independent copies for review
+martian evals convert promptfoo promptfooconfig.yaml --provider echo --strict --dry-run --output suite
+martian evals convert promptfoo promptfooconfig.yaml --provider echo --strict --output suite
+martian evals convert promptfoo promptfooconfig.yaml --all-providers --strict --output suites
 martian evals convert promptfoo promptfooconfig.yaml --target agent.py:answer \
-  --judge-model openai:/gpt-4.1-mini --output suite               # llm-rubric as the rubric judge
+  --judge-model openai:/gpt-4.1-mini --output suite              # best-effort rubric conversion
 ```
 
 [`examples/promptfoo`](../examples/promptfoo) has a config written by hand from promptfoo's
@@ -3924,7 +3927,7 @@ maps every field:
 | `Run` | Source `local`, state `completed`, a `stored` target, and a scorer for each assertion type. The model's `Target` has no name, so the provider names the run: its code is `promptfoo-`, the provider's label (else its id) and the run's number among that provider's imported runs, such as `promptfoo-mini-2`, and `provenance["promptfoo"]["provider"]` holds its id and label. The provenance also keeps the file's path and SHA-256, the eval id, the timestamp, the description, the prompts' metrics and promptfoo's stats |
 | `CaseResult` | One per result row (a test, once per prompt and repeat), with case id `test <n>`, `test <n>, prompt <m>` when the eval has several prompts, and ` (repeat <k>)` for a later repeat. Its inputs are the rendered prompt and the vars, its expectations the test's assertions, its output the provider's, and its latency promptfoo's |
 | `Score` | One per assertion promptfoo graded, named after the assertion's type (`icontains`, a second one `icontains (2)`, one inside an `assert-set` `assert-set/regex`). The value and the verdict are the assertion's pass, as a suite file's checks record theirs, so Quality shows each assertion's pass rate; promptfoo's numeric score is `metadata["promptfoo.score"]` and its reason the rationale. Model-graded types (`llm-rubric`, `factuality`, `g-eval` and the others) and red team graders have source `llm_judge` |
-| `Trace` | One span, the provider call, with the prompt, the output, the vars, token use and cost, carrying the case's scores |
+| `Trace` | The archived span tree when the result links to a trace. Otherwise, one provider span with the recorded prompt, output, variables, usage and cost. Both carry the case's scores |
 
 - A case's status is promptfoo's own verdict on the row: `failureReason` 2 (the provider or a
   grader failed) is `error`, a row that passed is `passed`, and any other `failed`, so a test's
@@ -3934,100 +3937,246 @@ maps every field:
   columns of their own (`promptIdx` 0 and 1 for the first provider's two prompts, 2 and 3 for the
   second's), so `prompt <m>` counts the prompts by their `promptId` instead, in the order the file
   first gives them.
-- Every file is read before anything is written, so a file that is not promptfoo results, one
-  of another version, one without rows, or one that has a provider's case twice or two providers
-  with one label stops the command with exit code `2` and writes nothing.
+- Providers can share a display label. The SDK keeps each recorded provider's ID and label and
+  adds a provider number to distinguish the runs. When declarations also share an ID, the SDK
+  checks the exported prompt columns against the declared provider and inline prompt order.
+  The run provenance records the verified provider position, starting at 1.
+- Import an unchanged archive again to reuse the completed run IDs, case traces and reviews.
+  JSON formatting, sharing URLs and export metadata such as the export time do not change the
+  archive's identity. The first import's source path and file SHA-256 stay attached to the run.
+  Changed scan data creates another set of provider runs, preserving the earlier snapshots.
+- For runs imported before archive deduplication, reimport the byte-identical source file once
+  to link that run to later re-exports. `--new-id` creates independent copies and leaves the normal
+  reimport pointed at the original. An incomplete attempt remains visible and a retry records
+  its unfinished providers as new runs.
+- Every file is read before anything is written. Invalid versions, empty exports, duplicate
+  cases or repeated provider declarations without a verifiable column layout exit with code `2`.
+  Imports in one data folder serialize. The command waits up to five seconds for the write lock,
+  then exits with code `2` if another import still holds it.
 - The file's `config` section is not copied into the run, only its `description`.
+
+### Embedded traces and media
+
+To include media in a portable Promptfoo or Marsfoo archive, export the saved eval with
+`promptfoo export eval EVAL_ID --include-media -o results.json`, then import the file as usual.
+The SDK attaches exported spans by the row's recorded trace ID and preserves their hierarchy,
+timestamps, statuses and attributes. **View trace** shows those spans with the case's scores.
+The trace inspector shows up to 200 spans and marks larger traces as truncated.
+
+**Imported media** in the local result shows attachments referenced by that case or its linked
+trace. The SDK verifies each supplied asset's decoded size (up to 50 MiB) and SHA-256, stores it
+with its run, and serves it as a download from
+`GET /v1/local/evals/runs/{run_id}/promptfoo-media/{sha256}`. References whose bytes were omitted
+remain visible as unavailable. The [Martian data export](data-export.md) includes the stored run
+artifacts. Malformed linked traces and invalid bytes for linked media are rejected before import writes
+any runs.
+
+Reimporting an evidence-bearing archive recorded by an older SDK creates a new snapshot with
+the newly supported evidence. The earlier run and its reviews remain available.
 
 ### Converted configs
 
-The converter reads `prompts`, `providers`, `tests` with `vars` and `assert`, and `defaultTest`,
-and writes the suite files where the features map:
+Run `--strict --dry-run` to check a migration before using the resulting suites as CI gates.
+`--strict` exits with code 2 and leaves the output untouched when the converter finds an
+omission or a known difference that can affect scoring, coverage, or execution. `--dry-run`
+previews the conversion without writing files. Best-effort conversion is the default and reports
+omissions and checks that need verdict review. See [Promptfoo's test configuration](https://www.promptfoo.dev/docs/configuration/test-cases/).
 
 - Each test, once per prompt, is a case. The prompt rendered with the test's vars is the input
   `prompt` (`input_key: prompt`) and the vars are the input `vars`. Prompts are inline text,
   `{raw, label}` objects, or `.txt` and `.md` files (a `.txt` file split on `---` lines).
   Templates fill `{{ name }}` and `{{ name.key }}`; a var a test does not have is empty, as in
-  promptfoo. Case ids are the ones the importer gives the same tests' results under every
-  provider, when the file's first provider runs every prompt.
-- `defaultTest` assertions and vars apply to every test, its assertions first, as promptfoo runs
-  them. `{{ name }}` in an assertion's value is filled from the test's vars.
-- A suite file applies every check to every case, and promptfoo asserts per test, so tests that
-  need the same checks share a suite: `evals.yaml` and `cases.jsonl`, then `evals-2.yaml`,
-  `cases-2.jsonl` and output folder `results-2` for the next group, and so on. Two tests share a
-  check when they assert the same type the same number of times with the same options; a text
-  check's values and a rubric that differ between them are read from each case's expectations.
-- `--target FILE.py[:FUNCTION]` is the target, called as `FUNCTION(prompt=..., vars=...)` (the
-  function defaults to `target`), and written relative to the suite file. Without it, each
-  test's `providerOutput` is the stored reply the suite grades, and a test without one is not
-  converted.
-- `--judge-model` is the rubric judge's model for `llm-rubric`; without it, `llm-rubric` does not
-  convert. promptfoo's grading `provider` is not read.
-- A folder that already has one of the files to write stops the command with exit code `2` before
-  anything is written, and so does a config with nothing that converts.
+  Promptfoo. The converter removes one trailing newline from a string var before rendering.
+  Case IDs match imported results when the export preserves unambiguous declared prompt positions.
+- `tests` can be inline test objects, paths to local YAML, JSON, JSONL or CSV files, or an
+  ordered mix. Use relative paths from the config directory, with an optional `file://` prefix.
+  YAML, JSON and JSONL files contain Promptfoo test objects. CSV files can use columns such as
+  `__expected`, `__expected2`, `__providerOutput`, and `__description`. Other ordinary columns
+  supply vars. Diagnostics identify the source file and row.
+- `defaultTest` can be inline or a local YAML or JSON object. Its assertions run first, unless
+  the test sets `options.disableDefaultAsserts: true`. Test vars override defaults and fill
+  `{{ name }}` in assertion text. A test inherits the default threshold unless it provides its own.
+- Configs with derived metrics produce one suite per selected provider and use check sets for
+  tests with different scoring rules. For other configs, tests that need the same checks share
+  a suite. The first is `evals.yaml` with `cases.jsonl`, and the next group uses `evals-2.yaml`,
+  `cases-2.jsonl`, and the output folder `results-2`. Tests share a check when they assert the
+  same type the same number of times with the same options. A text check's values or rubric can
+  come from each case's expectations.
+- `--provider ID_OR_LABEL` selects one source provider or target by its exact ID or label.
+  Use `--all-providers` to convert every supported declaration in one pass. This writes
+  separate suites and results folders for each provider, such as `evals-provider-1.yaml` and
+  `results-provider-1`. The preview lists the source provider and number of cases for every
+  suite. Strict mode checks the whole selection before writing. Best-effort mode lists
+  providers without a native mapping and converts the supported ones.
+  `--all-providers` uses the source providers and cannot be combined with `--provider` or `--target`.
+  A single plain `echo` provider uses each rendered prompt as its stored reply. A supplied
+  `providerOutput` takes precedence. A derived-metric suite can score supplied replies and call
+  the HTTP target for the remaining cases in the same run. Other conversions group supplied
+  replies into their own suite.
+- `--target FILE.py[:FUNCTION]` supplies a trusted local adapter called as
+  `FUNCTION(prompt=..., vars=...)`. The function defaults to `target`. The converter writes its
+  path relative to the suite file. Use a separate conversion per provider to keep their runs distinct.
+- Per-test `providers` and `prompts` select the cases for each provider and prompt. A test can
+  override either filter inherited from `defaultTest`. A provider's `prompts` intersects with
+  the test's selection. Filters accept IDs, labels, trailing wildcard patterns like
+  `FAQ:*`, and colon-delimited prefixes like `FAQ`. An empty list selects no cells.
+  Named prompt filters require resolvable, inline prompt identities. An unresolved
+  selector stops conversion before writing. Converted case IDs keep declared test and prompt
+  positions. Result imports use those positions when they can match exported columns
+  unambiguously to the inline prompts.
+- `--judge-model` supplies the model for `llm-rubric` and `not-llm-rubric` conversion.
+  The suite preserves each rubric's score threshold, negation and contribution to
+  weighted gates. Martian uses its own grading prompt and structured response schema.
+  Strict conversion flags this difference. Compare the model's verdicts with Promptfoo
+  before using the converted suite to gate CI.
+- The command exits with code 2 if a destination file already exists or no test can be converted.
 
-Assertions map onto the built-in checks ([deterministic checks](evals.md#deterministic-checks) and
-the rubric judge). An assertion converts only when its check decides the way promptfoo does;
-everything else is listed:
+#### Compare an import with a converted run
+
+For a local comparison between an imported run and a converted run, re-import the Promptfoo
+results and open **Evals → Compare**. When the dataset identities differ, Compare verifies
+every shared case against its rendered prompt, variables, effective deterministic checks,
+and any case weights or thresholds. Import collects this evidence from the saved assertions and
+component verdicts. The comparison response identifies the basis as
+`comparison_basis: "promptfoo_deterministic"` and the UI labels the results **Case verdict**.
+Coverage shows cases present on only one side. A case without a verdict stays incomparable.
+
+For this comparison, the recorded inputs and check rules must match throughout the shared
+cases. Custom code, model graders, transformed assertions, and incomplete scoring records
+can leave a case without verifiable rules. Import also checks archived XML grades against
+the SDK's XML parser. A disagreement preserves the archived grade and prevents a verified
+comparison. An earlier import stays readable and can collect the evidence through a fresh import.
+Scheduled comparisons and scoring-job comparisons use
+the immutable dataset check.
+
+#### Native HTTP and OpenAI-compatible chat providers
+
+Conversion can create an SDK URL target from either provider configuration. Conversion writes
+the suite locally. Running the resulting suite sends one JSON POST per live case.
+
+| Source provider | Supported configuration |
+| --- | --- |
+| `http`, `https`, or an HTTP URL as provider ID | An explicit `method: POST` and a JSON object or array body with case templates. `transformResponse` or `responseParser` can select `text` or a JSON property such as `json.choices[0].message.content`. A simple `(payload) => payload.answer` selector also works. Without a selector, JSON is read as the reply and other content as text. |
+| `openai:chat:MODEL` or `openai:gpt-4...` | An explicit `apiBaseUrl` and `apiKeyEnvar` for an authenticated compatible endpoint. The converter preserves plain prompts or JSON message arrays, and literal options such as `temperature`, `max_tokens`, `top_p`, `seed` and `response_format`. |
+
+HTTP body templates can use `{{prompt}}` and simple case variables, including dotted names.
+Conversion stores the resulting request fields in the case's inputs. Convert again after editing
+the source prompts or vars. HTTP URLs and headers can use `{{env.NAME}}`, which becomes
+`${NAME}` in the SDK suite. The runner reads the environment values when it runs.
+Pointing an environment-backed URL at a different endpoint causes a resumed run to regrade.
+Use `apiKeyRequired: false` and `useDefaultApiKey: false` together for an unauthenticated
+OpenAI-compatible endpoint. Set generation values explicitly when the source uses ambient
+OpenAI environment overrides.
+
+Strict conversion flags unsupported methods, response scripts, request transforms, provider
+retries, and specialized model options. HTTP errors remain target errors, and the runner refuses
+redirects. Cost assertions need a target that records the usage or pricing data they measure.
+[Promptfoo HTTP providers](https://www.promptfoo.dev/docs/providers/http/) · [Promptfoo OpenAI providers](https://www.promptfoo.dev/docs/providers/openai/)
+
+#### Assertion conversion
+
+The converter maps assertions onto the SDK's [deterministic checks](evals.md#deterministic-checks)
+and [scored rubrics](evals.md#scored-rubrics).
 
 | promptfoo assertion | Suite check |
 | --- | --- |
 | `contains`, `contains-all` | `contains`, `case_sensitive: true` |
-| `icontains`, `icontains-all` | `contains` |
-| `contains-any`, `icontains-any` | `contains`, `any_of: true` (and `case_sensitive: true` for `contains-any`) |
+| `icontains`, `icontains-all` | `contains`, `case_mapping: lower` |
+| `contains-any`, `icontains-any` | `contains`, `any_of: true`, with `case_sensitive: true` or `case_mapping: lower` respectively |
 | `not-contains`, `not-contains-any` | `not_contains`, `case_sensitive: true` |
-| `not-icontains`, `not-icontains-any` | `not_contains` |
-| `regex`, `not-regex` | `matches`, `not_matches`: the pattern as written, read by Python's `re` (a pattern Python cannot read is listed) |
+| `not-icontains`, `not-icontains-any` | `not_contains`, `case_mapping: lower` |
+| `regex`, `not-regex` | `matches`, `not_matches`. The portable subset covers ASCII literals, positive classes, basic groups, quantifiers and anchors. Best-effort mode reports patterns outside that subset. |
 | `equals`, `not-equals` (text, a number or a boolean) | `matches`, `not_matches` on `\A<text>\Z` |
 | `starts-with`, `not-starts-with` | `matches`, `not_matches` on `\A<text>` |
-| `is-json`, with no schema or one of only `type: object` and `required` | `is_json`, with `required_keys` |
-| `llm-rubric` with a text rubric | `rubric`, on `--judge-model`; one per suite, so a test's second is listed |
+| `equals`, `not-equals` (object or array) | `json_schema` with `const` and `plain_json: true`. `not-equals` also sets `negate: true`. |
+| `is-json`, `not-is-json` | `is_json` or `json_schema` with `plain_json: true`. `not-is-json` sets `negate: true`. |
+| `contains-json`, `not-contains-json` | `json_schema` with `embedded: promptfoo`. Any matching object counts. With no schema, the converter uses `{}`. `not-contains-json` sets `negate: true`. |
+| `is-xml`, `not-is-xml`, `contains-xml`, `not-contains-xml` | `is_xml` with comma-separated or listed element paths, including `value.requiredElements`. The converter reads literal local JSON or YAML files and resolves simple case variables in paths. The `contains-xml` forms set `fragment: true`. Negated forms set `negate: true`. Martian requires well-formed fragments. |
+| `levenshtein`, `not-levenshtein` | `levenshtein`. The threshold is the maximum UTF-16 edit distance. It defaults to 5, and a fractional threshold rounds down. |
+| `word-count`, `not-word-count` | `word_count` with whole-number `min_words` or `max_words` from `min` and `max`. An exact count sets both bounds. |
+| `llm-rubric`, `not-llm-rubric` with a text rubric | `scored_rubric` on `--judge-model`, including multiple rubrics per test. The assertion's `threshold` sets `score_threshold`. |
 | `latency` with a `threshold` above 0, and `--target` | `latency`, `max_ms` the threshold: the target's call took at most that many milliseconds |
 | `cost` with a `threshold` above 0, and `--target` | `cost`, `max_usd` the threshold: the target's call cost at most that many US dollars |
 
-Case-insensitive checks compare with Python's `casefold`, where promptfoo lowercases; a value of a
-`-any` or `-all` type given as text is split on commas, as promptfoo splits it. `latency` and
-`cost` pass at the threshold, as promptfoo's do, and a call with no figure to compare is an error
-in both. promptfoo times and prices its provider's call; the checks read the trace MLflow records
-for the target's call, so `cost` needs the target's model calls traced with their token use (a
-target that makes none, such as `examples/promptfoo/agent.py`, gives the check an error, where
-promptfoo takes a cost the provider reports itself). A `threshold` is the limit of these two, not
-a score threshold.
+Text values for `-any` and `-all` support quoted fields, quoted commas, and escaped quotes.
+The text reference for edit distance and an exact word count given as decimal text can use
+simple case variables. Both `not-` forms set `negate: true` and keep their weight in case gates.
+The CSV shorthand `levenshtein:reference` uses Promptfoo's CSV default of 0.75, which allows
+zero edits. Use `levenshtein(1):reference` to allow one edit.
+[Promptfoo deterministic metrics](https://www.promptfoo.dev/docs/configuration/expected-outputs/deterministic/)
+
+JSON assertions with a schema accept a literal `file://` reference to a local `.json`, `.yaml`, or
+`.yml` schema. Conversion embeds the schema in the suite. For Compare, the SDK checks archived
+embedded JSON verdicts against the saved output and the inline schema. A reference to a schema file
+alone cannot establish its original contents, so those archived cases stay incomparable.
+Use `martian evals import promptfoo --new-id results.json` to collect embedded JSON comparison
+evidence for an archive already imported by an older SDK. Its original run and reviews stay available.
+Strict conversion flags latency and cost because the SDK measures the local adapter and reads
+usage from its traces. Pass provider-equivalent text to a Python adapter for text assertions.
+Stored structured replies with text checks also require verdict review.
+
+A custom `rubricPrompt` becomes `judge_prompt` on the converted scored rubric.
+An assertion's override takes precedence over the test and the default test.
+Conversion accepts text, YAML or JSON lists of text chat messages, and literal
+`file://` references to local `.txt`, `.md` or `.json` prompts. It inlines the templates.
+Simple placeholders can use the candidate response, rubric and test variables.
+Filters, expressions and property access are outside this subset. Strict conversion
+still flags graded assertions for review because the SDK asks the judge for its own
+structured response schema. [Promptfoo custom rubric prompts](https://www.promptfoo.dev/docs/configuration/expected-outputs/model-graded/llm-rubric/#customizing-the-rubric-prompt)
+
+The converter preserves test thresholds, assertion weights (including zero), and one level of
+`assert-set` groups for supported assertions. These become a
+[weighted case gate](evals.md#weighted-case-gates). If an assertion that contributes to a
+threshold or assertion set cannot be converted, the converter reports and skips that test.
+Strict mode refuses the conversion as a whole. The converter preserves `metric` labels on checks
+and assertion sets, including simple variable templates. Each generated suite has its own rollup
+over the cases it grades.
+[Promptfoo weighted assertions](https://www.promptfoo.dev/docs/configuration/expected-outputs/#weighted-assertions) · [Promptfoo named metrics](https://www.promptfoo.dev/docs/configuration/expected-outputs/#defining-named-metrics)
+
+The converter maps arithmetic `derivedMetrics` to the suite's
+[derived metrics](evals.md#derived-metrics). It keeps the provider's cases together and uses
+[case-specific check sets](evals.md#case-specific-checks) when the tests vary their assertions,
+thresholds, or stored replies. Formulas use separate totals and `__count` for each prompt in that
+provider run. Strict conversion flags function-valued formulas and invalid expressions. After a
+formula changes, the runner can recompute it from saved case results. [Promptfoo derived metrics](https://www.promptfoo.dev/docs/configuration/expected-outputs/#creating-derived-metrics)
+
+Imported results preserve each case's recorded named scores and weights. The run's `named_metrics`
+provenance summarizes all measured cases in that provider's run. Its Promptfoo provenance also
+keeps the exported per-prompt metrics. The importer records archived derived scores from each
+column as supplied, with an unavailable status if a value is missing or non-finite. To collect the
+metric summaries for an archive already imported by an older SDK, use
+`martian evals import promptfoo results.json --new-id`.
 
 | Listed, not converted | Why |
 | --- | --- |
 | `javascript`, `python`, `ruby`, `webhook` | Custom code, which the built-in checks do not run. Write the rule as a custom Python scorer, `def scorer(inputs, outputs, expectations)` (name only the arguments it reads, `trace` too) returning `True` or `False`, a number, or a pair of either with a reason, and add it by hand as a `type: python` check with `file:` and `function:`. The converter does not translate the code |
-| `contains-json` | Finds JSON inside other text; `is_json` needs the whole reply to be JSON |
-| `is-json` with any other schema, `equals` with a JSON value | No built-in check validates a schema or compares JSON values |
+| JSON assertion schemas with unsupported keywords or dialects, including `format` and `pattern` | Conversion requires a schema the SDK can validate with the same rules. |
 | `latency`, `cost` with no `threshold`, one of 0 or less, or stored replies | The checks need a limit above 0 and a call to measure. A `cost` with no threshold is a promptfoo metric, which no check records |
 | `is-refusal` | Passes only a refusal; no check does (`no_refusal` passes the opposite) |
 | `not-is-refusal` | promptfoo counts a reply as a refusal when it starts with one of its refusal phrases, such as "I'm sorry", or holds one anywhere, such as "as an AI". `no_refusal` reads the reply's opening and passes a decline that goes on to answer, so the two decide some replies differently; add `no_refusal` by hand to use it |
 | `promptfoo:redteam:pii` and its variants | A model judges whether the reply discloses personal data, names, addresses and records included, and allows what the user gave or the purpose permits. `no_personal_data` finds email addresses and phone, card, IBAN and national id numbers by their form, with no context; add it by hand to use it |
 | `promptfoo:redteam:indirect-prompt-injection` | A model judges whether the reply followed the injected instructions, the assertion's value. `resists_injection` looks for a marker that only following them produces, which a config does not name; add it by hand with one |
 | Other red team graders | Graded by a model with their own prompts |
-| `similar`, `levenshtein`, `rouge-*`, `bleu`, `gleu`, `meteor`, `perplexity` | Closeness to a reference text or perplexity |
+| `similar`, `rouge-*`, `bleu`, `gleu`, `meteor`, `perplexity` | Closeness to a reference text or perplexity |
 | `factuality`, `g-eval`, `answer-relevance`, `context-*`, `model-graded-*` and other model-graded types, `classifier`, `moderation`, `pi` | Graded by a model with their own prompts |
 | `is-valid-function-call`, `is-valid-openai-function-call`, `is-valid-openai-tools-call` | Validate the reply's tool calls against the schemas of the provider's own `tools` or `functions`. The closest check, `tool_called` with `arguments_match: schema`, checks the calls of a tool it names against a schema it gives; add it by hand to use it |
 | `tool-call-f1` | Scores the reply's set of tool names against the expected set (F1, which passes at the default threshold of 1.0 only when the two sets are equal), and also reads Responses API `function_call` items and JSON on lines of its own inside text. The closest check, `tool_trajectory` with `order: any_order`, passes when the expected calls are made, other calls too, and refuses those replies; add it by hand to use it |
 | `trajectory:tool-used`, `trajectory:tool-args-match`, `trajectory:tool-sequence`, `trajectory:step-count` | promptfoo reads every span of its trace that names a tool in its attributes, a tool's own inner spans too, and matches a tool's name as a case-insensitive pattern (`*` and `?`). The closest checks, `tool_called` (with `arguments_match` for `tool-args-match`), `tool_trajectory` and `step_count`, read the `TOOL` spans of MLflow's trace of the target's call, not those inside a tool span, and compare the name as written. Besides: `tool-args-match` matches lists item by item and has `defaults` and `ignore`; `tool-sequence` orders tool spans by start time, where `tool_trajectory` orders model turns, so calls made in parallel in one turn are in order for promptfoo and not for `in_order`; `step-count` counts the trace's steps of a type, and a trace with no tool span as none, where `step_count` counts model turns and tool calls and reads no trace without a model or tool span. Add the check by hand with `source: trace` to use it |
 | Trace assertions, `finish-reason`, `guardrails`, `skill-used` | Read the provider's trace or metadata |
-| `is-html`, `is-sql`, `is-xml` and their `contains-` forms, `word-count` | No built-in check reads them |
-| `assert-set`, `select-best`, `max-score`, `human`, other `not-` forms, unknown types | No check combines, compares or negates them |
+| `is-html`, `is-sql` and their `contains-` forms | No built-in check reads them |
+| `select-best`, `max-score`, `human`, other `not-` forms, unknown types | These need multiple responses, a human decision, or unsupported comparison rules |
 
 `not-contains`, `not-icontains` and their `-any` forms convert to `not_contains`, which matches a
 value as written, as promptfoo does. `no_prohibited_phrases`, added by hand, also matches a phrase
 through case, spacing and disguises.
 
-Options are listed too. `weight`, `metric` and an assertion's grading `provider` do not change its
-verdict, so the assertion converts and the option is listed. `transform`, `contextTransform`,
-`threshold` (except on `latency` and `cost`), `rubricPrompt`, `normalizeUnicode`, `config` and
-unknown options would, so the assertion is listed and not converted, as is one whose value is a `file://` reference or uses
-Nunjucks beyond `{{ name }}`. A test's `threshold`, `metadata`, `options`, `provider`,
-`providers`, `prompts` and `assertScoringFunction` are listed and not applied; a test with a list
-var (which promptfoo runs once per value) or a `file://` var is listed and not converted. The
-providers, prompts that are not text or `.txt` and `.md` files, `tests` or `defaultTest` in a
-file, `scenarios` and every other top-level field are listed. The command prints the list, and
-each suite file holds it as comments at its top, with the tests it covers.
+Strict conversion flags unsupported scoring rules, custom transforms, provider overrides, list
+var expansion, file-backed vars and assertion values, scenario expansion, and complex
+Nunjucks templates. External prompt sources and structured prompts for providers without a native
+mapping also require review. Test metadata and settings for writing or sharing output appear as
+informational omissions. Conversion reads supported local data files and does not execute
+hooks, scripts or providers. The command prints its diagnostics and records
+them as comments in each generated suite.
 
 `tests/evals/test_promptfoo_import.py` imports `examples/promptfoo/results.json` and reads it back
 through the local edition's routes: both providers' runs, their cases and verdicts, every

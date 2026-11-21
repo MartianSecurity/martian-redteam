@@ -1,7 +1,7 @@
 """The output formats a red team run can be written in, beside ``redteam-run.json``,
 ``redteam-report.json`` and ``redteam-report.md``, which every run writes.
 
-Each is rendered from the run's report copy (:func:`martian.redteam.engine.report.for_report`), so it
+Each is rendered from the run's report copy (:func:`martian.redteam.report.files.for_report`), so it
 holds digests of the target's content unless the run was asked for the content, and never a
 credential.
 """

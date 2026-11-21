@@ -693,10 +693,13 @@ def audit_suite(
     case, scripted or simulated, is not audited: an audit grades one reply per case, and
     ``skipped`` counts them. Returns the audit, with the folder it was written to under
     ``output``."""
+    from martian.config import ConfigError
     from martian.evals import runner
     from martian.evals.suite_file import load_suite_file
 
     model, model_cases = load_suite_file(path)
+    if model.check_sets:
+        raise ConfigError("case-specific check sets require martian evals run")
     suite, base = runner.load_suite(path)
     if limit is not None:
         model_cases = model_cases[:limit]

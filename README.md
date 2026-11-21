@@ -52,6 +52,9 @@ pull request with the last result of `main` and name the cases that went from pa
 
 ## What is in the package
 
+The local Findings and Remediation features, MCP tools, XML checks and strict migration options
+below require the preview SDK. Use the matching workbench build for the new Red Team screens.
+
 - `martian evals run`: a suite file run locally, as above.
 - `martian evals prompts push`: a suite file's matrix prompts kept as immutable versions in the
   local Evals UI, where each later run shows the prompt version it used; see
@@ -65,18 +68,17 @@ pull request with the last result of `main` and name the cases that went from pa
 - `martian evals import inspect`: Inspect AI logs (`.eval` or `.json`) as runs in `martian ui`,
   to open, compare and review; see
   [imported Inspect logs](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#imported-inspect-logs).
-- `martian evals import promptfoo` and `martian evals convert promptfoo`: promptfoo results as
-  runs in `martian ui`, one per provider, and a promptfoo config as suite files where its
-  assertions map onto the checks, with everything that does not listed; see
-  [promptfoo results and configs](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#promptfoo-results-and-configs).
+- `martian evals import promptfoo` and `martian evals convert promptfoo` import saved Promptfoo
+  or Marsfoo results as provider runs and convert supported assertions to native suites.
+  Use `--strict --dry-run` on conversion to check coverage before writing suite files.
+  [Promptfoo and Marsfoo migration](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#promptfoo-results-and-configs)
 - `martian evals import mlflow`: an MLflow tracking store (SQLite or Postgres) copied into
   `martian ui`: experiments, traces, datasets, assessments and evaluation runs, after a schema
   version check; see
   [copied MLflow stores](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#copied-mlflow-stores).
-- `martian evals export` and `martian evals import martian`: everything in `martian ui`'s data
-  folder (runs, case results, scores, datasets, reviews and annotations, traces and the rest) as
-  JSON Lines files with a manifest, resumable, and loaded into a fresh install with nothing lost;
-  see [data export](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/data-export.md).
+- `martian evals export` and `martian evals import martian` move saved Evals records and artifacts
+  in a resumable archive with a manifest. Red Team scans and triage use their own transfer
+  workflow. [Data export](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/data-export.md)
 - `martian evals push`: `martian ui`'s finished runs, with their case results, scores and traces,
   sent to a Martian server with an organisation API key; pushing again sends only what the server
   lacks; see
@@ -85,19 +87,23 @@ pull request with the last result of `main` and name the cases that went from pa
   service. It runs evals against endpoints you define with your own key, and runs them again;
   see
   [the local edition](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-martian-ui).
-  Its Red Team pages show the red team runs kept in the same data folder: each run's report,
-  attempts, findings (which you can annotate), the catalogue and framework coverage. They also
-  start a red team run against one of those endpoints with your own models, and stop and resume
-  it. It also shows the traces an application records into it with
+  The Red Team pages show saved scans, attempts, catalogue and coverage. With the matching
+  workbench build, review recurring findings and triage history, export a remediation report
+  and verify a fix using a saved follow-up with matching coverage.
+  [Local findings and remediation](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/redteam-findings.md)
+  The UI can start, stop and resume local scans and show application traces recorded with
   [MLflow tracing](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#traces-from-an-application).
   The repository's `Dockerfile` builds it as an image for one user on a small server; it has no
   login, so never expose it publicly
   ([in a container](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-in-a-container)).
+- `martian mcp` serves read-only local report summaries over stdio and previews deterministic
+  checks or suite validation on supplied data. Install with the `evals` and `mcp` extras.
+  [Connect a local MCP client](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/sdk-and-ci.md#connect-an-mcp-client-to-local-reports)
 - `martian.evals`: LLM judges (`response_rubric`, `response_guidelines`, `response_conditions`),
   grounding and retrieval judges (`groundedness`, `context_relevance`, `context_sufficiency`),
   a panel of several judge models decided by a strict majority (`judge_panel`),
   conversation judges (`task_completion`, `policy_adherence`, `knowledge_retention`),
-  twenty-eight deterministic checks on the reply's text, its JSON, its numbers and tables, its
+  deterministic checks on the reply's text, its JSON and XML, its numbers and tables, its
   personal data, secrets, planted-instruction markers and refusals, the agent's tool calls and
   their order, turn by turn, and the call's latency and cost, custom checks written as Python
   functions (unsandboxed: they run with the caller's privileges), each judge version's agreement

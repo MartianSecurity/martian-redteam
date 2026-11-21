@@ -82,9 +82,9 @@ and its data give them again on the next load.
 | A row of the data file | `Case` (`id`, `inputs` or `input`, `expectations`, `outputs` or `output`); a JSONL row's `group` is the tag `martian.group` in `Case.tags`, its `turns` are `Case.turns`, each turn's `input` or `inputs`, `expectations` and `checks` a `Turn`, and its `simulated_user` is `Case.simulated_user` |
 | No `target` | `Target` of kind `stored`: the outputs come with the cases |
 | `target.file`, `target.function` | `Target` of kind `function` |
-| `target.url`, `headers`, `body`, `response_path` | `Target` of kind `http`, the URL and header values as written |
+| `target.url`, `headers`, `body`, `response_path`, `response_mode` | `Target` of kind `http`, the URL and header values as written |
 | `target.timeout_seconds` | `RunSettings.target_timeout_seconds`, for a function or an HTTP target |
-| Each entry of `checks`, in order | A `ScorerVersion` named by the check's label. `rubric`, `guidelines` and `conditions` are `kind: llm_judge` with their criteria in `criteria`; `groundedness`, `context_relevance` and `context_sufficiency` are `kind: llm_judge` with no criteria; the [conversation judges](evals.md#conversation-judges) `task_completion`, `policy_adherence` and `knowledge_retention` are `kind: llm_judge` with `scope: conversation`, and a `policy_adherence` check's `guidelines` are its `criteria.guidelines`; a judge check's `panel` is `ScorerVersion.panel`, a `PanelMember` for each model URI, in order, with no `model`; the other types are `kind: check` with the options they give in `parameters`, under the file's names (`values`, `expectation`, `any_of`, `case_sensitive`, `min_similarity`, `pattern`, `required_keys`, `schema`, `min_length`, `max_length`, `max_ms`, `max_usd`, `max_tokens`, `value`, `path`, `abs_tolerance`, `rel_tolerance`, `parts`, `add`, `subtract`, `total`, `key`, `columns`, `rows`, `kinds`, `allow`, `calls`, `arguments_match`, `order`, `source`, `min_calls`, `max_calls`, `min_turns`, `max_turns`). A [`python` check](evals.md#custom-python-checks) is `kind: code`, type `python`, with `file` (as written, relative to the suite file), `function`, `min_score`, `max_score` and `security` in `parameters`: the model names the code and never holds it, and neither loading nor writing imports the file. An [`installed` check](evals.md#installed-checks) is `kind: code`, type `installed`, named by its `name`, with its `options`, as written, in `parameters.options` and nothing else; writing always writes its `name`. Its `required: true` option, which makes it decide its case's status in a run ([required installed checks](evals-core.md#required-installed-checks)), is one of those options and not a field, so the model and the frozen contracts carry it unchanged. A figure (`value`, `abs_tolerance`, `rel_tolerance`, a cell of `rows`) keeps the form it is written in, a number or text such as `"1,234.56"`, so a written file says the same, and a tool-call check's `calls` keep theirs: a tool's name, an object with `name` and `arguments`, and in `tool_trajectory` a list for the calls of one model turn. `suite_file.CHECK_OPTIONS` lists which options each type takes |
+| Each entry of `checks`, in order | A `ScorerVersion` named by the check's label. `rubric`, `guidelines` and `conditions` are `kind: llm_judge` with their criteria in `criteria`; `groundedness`, `context_relevance` and `context_sufficiency` are `kind: llm_judge` with no criteria; the [conversation judges](evals.md#conversation-judges) `task_completion`, `policy_adherence` and `knowledge_retention` are `kind: llm_judge` with `scope: conversation`, and a `policy_adherence` check's `guidelines` are its `criteria.guidelines`; a judge check's `panel` is `ScorerVersion.panel`, a `PanelMember` for each model URI, in order, with no `model`; the other types are `kind: check` with the options they give in `parameters`, under the file's names (`values`, `expectation`, `any_of`, `case_sensitive`, `min_similarity`, `pattern`, `required_keys`, `required_elements`, `fragment`, `negate`, `schema`, `min_length`, `max_length`, `max_ms`, `max_usd`, `max_tokens`, `value`, `path`, `abs_tolerance`, `rel_tolerance`, `parts`, `add`, `subtract`, `total`, `key`, `columns`, `rows`, `kinds`, `allow`, `calls`, `arguments_match`, `order`, `source`, `min_calls`, `max_calls`, `min_turns`, `max_turns`). A [`python` check](evals.md#custom-python-checks) is `kind: code`, type `python`, with `file` (as written, relative to the suite file), `function`, `min_score`, `max_score` and `security` in `parameters`: the model names the code and never holds it, and neither loading nor writing imports the file. An [`installed` check](evals.md#installed-checks) is `kind: code`, type `installed`, named by its `name`, with its `options`, as written, in `parameters.options` and nothing else; writing always writes its `name`. Its `required: true` option, which makes it decide its case's status in a run ([required installed checks](evals-core.md#required-installed-checks)), is one of those options and not a field, so the model and the frozen contracts carry it unchanged. A figure (`value`, `abs_tolerance`, `rel_tolerance`, a cell of `rows`) keeps the form it is written in, a number or text such as `"1,234.56"`, so a written file says the same, and a tool-call check's `calls` keep theirs: a tool's name, an object with `name` and `arguments`, and in `tool_trajectory` a list for the calls of one model turn. `suite_file.CHECK_OPTIONS` lists which options each type takes |
 | A check's `combine` | `Suite.repeats.checks`, under the check's label. A check that names none has no entry: its rule is decided when the suite runs (`all` for a security check, else the suite's) |
 | A check's `scope` | `ScorerVersion.scope`; a check that names none is `turn`, and a conversation judge must name `conversation` |
 | `repeats`, `combine` | `Suite.repeats.attempts`, `Suite.repeats.combine` |
@@ -136,8 +136,8 @@ Nothing is dropped silently. Loading raises `ConfigError` naming the field for:
   `name`, or with `options` that are not a mapping.
 
 Writing raises `ConfigError` for a suite the file cannot hold: no target (a file without one
-grades stored outputs, which is a `stored` target), an `agent` target, `policies` (in a file, a
-case passes when every check passes it), `human` scorers, `code` scorers other than a python check
+grades stored outputs, which is a `stored` target), an `agent` target, run-level `policies`,
+`human` scorers, `code` scorers other than a python check
 with its `file` and `function` or an installed check with its `options`, a pinned scorer `version`,
 `llm_judge` scorers without a panel on different models, or any `llm_judge` scorers with different
 parameters (a file has one judge), a panel member with an `endpoint` (a file's judges are all
@@ -152,6 +152,14 @@ and must give the same definition, so a field the writer does not know is refuse
 any case runs, and records the run through the model: a `Run` of the loaded `Suite`, and a
 `CaseResult` and `Score`s for each `results.jsonl` record
 ([command-line runs](evals-core.md#command-line-runs)).
+
+The optional `Suite.case_gate` holds the weighted [case gate](evals.md#weighted-case-gates).
+The suite digest includes it when present. A suite-file run records its definition under
+`Run.provenance.case_gate`. The run's `case_gate` scorer records a numeric score, the gate
+verdict, and the assertion-set scores in the score metadata.
+For each `scored_rubric` check, `Score.value` holds the numeric grade and `Score.passed`
+holds its verdict. A stored attempt or conversation turn carries the grade in
+`CheckVerdict.value` when available.
 
 A suite with a matrix is recorded as one `Run` per combination, each with the same suite id and
 digest and its combination in `provenance.matrix`: `id` (such as `model=gpt-4o-mini,prompt=terse`,
@@ -290,7 +298,7 @@ gives it, and records each provider in it as one run
 
 | promptfoo results | Model |
 | --- | --- |
-| The file | `Run.provenance["promptfoo"]`: `results` (its absolute path), `results_sha256` and `results_version` |
+| The file | `Run.provenance["promptfoo"]`: `results` (its absolute path), `results_sha256`, `results_version` and `archive_sha256` for matching unchanged re-exports. Explicit copies record `import_copy: true` |
 | `evalId`, `results.timestamp`, `results.stats`, `metadata` (such as `promptfooVersion`), `config.description` | `eval_id`, `timestamp`, `stats`, `metadata` and `description` in `Run.provenance["promptfoo"]` |
 | `results.prompts` of the provider | `Run.provenance["promptfoo"]["prompts"]`: each prompt's `label`, `raw` and `metrics` |
 | A result's `provider` (`id`, `label`) | One `Run` per provider, with `provenance["promptfoo"]["provider"]`, the code `promptfoo-<label or id>-<n>`, and each trace's `model` the provider's id. `Run.target` is `stored` |
@@ -298,14 +306,17 @@ gives it, and records each provider in it as one run
 | `config.description` | `Run.dataset_name`, else the file's name. `Run.dataset_digest` is the digest of the cases' ids, inputs and expectations, so two providers over the same tests compare |
 | A result (`testIdx`, `promptIdx`, `promptId`, `repeatIndex`) | A `CaseResult`, in test, prompt and repeat order, with `case_id` `test <testIdx + 1>`, `, prompt <m>` when the file has several prompts, and ` (repeat <repeatIndex + 1>)` for a later repeat. `promptIdx` is a column per provider and prompt (with two prompts, the second provider's are 2 and 3), so `<m>` numbers the prompts instead: a column's prompt is its `promptId`, and a provider's second column with the same `promptId` (two prompts with one label) is another prompt. Prompts are numbered in the order of their first column, so the same test on the same prompt has one `case_id` under every provider |
 | `prompt.raw` (the rendered prompt), `vars` | `CaseResult.inputs.prompt` and `inputs.vars`; the prompt is the trace's request |
-| `testCase.assert` | `CaseResult.expectations.assert`; a grading `provider` given as an object is kept as its id only, here and in each score's metadata |
+| `testCase.assert` | `CaseResult.expectations.assert`. A grading `provider` object retains its id here and in each score's metadata |
+| `testCase.assert`, `testCase.threshold`, and recorded component verdicts | `CaseResult.promptfoo_contract` when the deterministic rules can be verified. The digest covers the rendered prompt, variables, effective checks and case gate. It is omitted when the evidence is unavailable |
 | `response.output` | `CaseResult.output` and the trace's response |
 | `success`, `failureReason` | `CaseResult.status`: `failureReason` 2 is `error`, else `passed` when `success`, else `failed` |
 | `error`, else `response.error`, when `failureReason` is 2 | `CaseResult.error`, and the trace's state is `error`. A failed assertion's reason, which promptfoo also puts in `error`, stays with its score |
 | `latencyMs` | `CaseResult.latency_ms` and the trace's latency |
 | `cost`, `tokenUsage.total` | The trace's `cost` and `tokens` |
 | `id`, `score`, `namedScores`, `testCase.description` | Trace metadata `promptfoo.result_id`, `promptfoo.score`, `promptfoo.named_scores` and `promptfoo.description`; tags `promptfoo.test_idx`, `promptfoo.prompt_idx` and `promptfoo.provider` |
-| `vars`, `response.cached`, the token use and cost | The span's attributes `promptfoo.vars`, `promptfoo.cached`, `promptfoo.token_usage` and `promptfoo.cost` |
+| `traceId`, `evaluationId`, and the linked record in `traces` | The case's local trace keeps the original evaluation, test-case and trace IDs in `promptfoo.source_evaluation_id`, `promptfoo.source_test_case_id`, and `promptfoo.source_trace_id`. It retains the source spans with their attributes and parent links. Partial span forests gain a common root where needed |
+| `vars`, `response.cached`, the token use and cost | When the archive supplies no linked spans, the provider span's attributes `promptfoo.vars`, `promptfoo.cached`, `promptfoo.token_usage` and `promptfoo.cost` |
+| Linked `blobAssets` | Verified bytes stored as run artifacts under `promptfoo-media/{sha256}`. `Run.provenance["promptfoo"]["media"]` maps case IDs to referenced hashes and records which assets are available |
 | `gradingResult.componentResults[]` (or `gradingResult` itself when it has an `assertion` and no components) | One `Score` each, below |
 
 | promptfoo assertion result | Model |

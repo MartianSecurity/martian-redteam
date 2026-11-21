@@ -47,6 +47,7 @@ from martian.evals.runner import (
 from martian.redteam.runfile import TargetSession as SessionSettings
 from martian.redteam.targets import TargetReply
 from martian.redteam.targets.conversations import Conversations
+from martian.redteam.targets.identity import endpoint_identity
 from martian.redteam.targets.reply import read_path, reply_text, tool_calls
 
 
@@ -70,6 +71,7 @@ class HttpTarget:
         self._session = session or SessionSettings()
         self._policy = address_policy
         self._url = _from_environment(reference.url, "target.url", environ)
+        self.findings_key, self.name = endpoint_identity(self.kind, self._url, has_headers=bool(reference.headers))
         self._headers = {
             name: _from_environment(value, f"target.headers.{name}", environ)
             for name, value in reference.headers.items()

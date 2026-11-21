@@ -40,6 +40,12 @@
       "reason": "The metadata names no BSD variant; licenses/LICENSE in the distribution is the 3-clause text."
     },
     {
+      "component": "pypi:reportlab",
+      "declared": "BSD License",
+      "licence": "BSD-3-Clause",
+      "reason": "The ReportLab wheel's licenses/LICENSE includes the source and binary redistribution clauses and the non-endorsement clause."
+    },
+    {
       "component": "generic:python",
       "declared": "",
       "licence": "PSF-2.0",
@@ -47,6 +53,11 @@
     }
   ],
   "exceptions": [
+    {
+      "component": "pypi:pillow",
+      "licence": "MIT-CMU",
+      "reason": "Pillow's wheel declares the CMU License and keeps its copyright and permission notices in licenses/LICENSE. The permission covers use, modification and redistribution."
+    },
     {
       "component": "npm:@fontsource-variable/inter",
       "licence": "OFL-1.1",
