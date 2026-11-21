@@ -56,12 +56,24 @@ from martian.redteam.model import RedteamRun
 from martian.redteam.runfile import RunFile
 from martian.redteam.server import RunStart
 from martian.redteam.server.push import CLIENT_EXECUTED
-from martian.redteam.store import RedteamStore, finished
+from martian.redteam.store import RedteamStore, finished, redteam_header
 from martian.redteam.verify.canary import planted_run_file
 
 RESUMABLE = ("cancelled", "stopped", "failed")
 """The states a run can be resumed from. A ``running`` run whose task is gone, because the server
 that ran it stopped, can be resumed too."""
+RESUME_STATE_DETAIL = "Only a stopped, cancelled or failed run can be resumed; this one is {state}"
+
+
+class _ActiveSession(HTTPException):
+    """A local or cross-process session still holds the run."""
+
+
+def _saved_local_launch(provenance: object) -> dict[str, Any] | None:
+    if not isinstance(provenance, dict) or provenance.get("execution") == CLIENT_EXECUTED:
+        return None
+    launch = provenance.get("launch")
+    return launch if isinstance(launch, dict) and isinstance(launch.get("run_file"), dict) else None
 
 
 class LocalLauncher:
@@ -123,12 +135,12 @@ class LocalLauncher:
     @contextmanager
     def _admission(self, principal: Principal, project_id: str, run_id: str) -> Iterator[tuple[ExitStack, bool]]:
         if (project_id, run_id) in self.tasks:
-            raise HTTPException(409, "This red team run already has an active session")
+            raise _ActiveSession(409, "This red team run already has an active session")
         with ExitStack() as lease:
             try:
                 exclusive = lease.enter_context(self.store.run_session(project_id, run_id, principal=principal))
             except ResumeError as error:
-                raise HTTPException(409, str(error)) from None
+                raise _ActiveSession(409, str(error)) from None
             yield lease, exclusive
 
     async def start(
@@ -283,29 +295,35 @@ class LocalLauncher:
         """Go on with a stopped, cancelled or failed run with the run file and local target it was
         started with. Each finished attempt whose fingerprint is unchanged is kept, and the rest run
         again; what the earlier session spent still counts against the budget."""
-        with self._admission(principal, project_id, run_id) as (lease, exclusive):
-            earlier = await self.store.get(project_id, run_id, principal=principal)
-            if earlier is None:
-                raise HTTPException(404, "Red team run not found")
-            launch = earlier.provenance.get("launch")
+        try:
+            with self._admission(principal, project_id, run_id) as (lease, exclusive):
+                earlier = await self.store.get(project_id, run_id, principal=principal)
+                if earlier is None:
+                    raise HTTPException(404, "Red team run not found")
+                launch = _saved_local_launch(earlier.provenance)
+                if launch is None:
+                    raise HTTPException(
+                        409,
+                        "This run was not started here, so its run file is not kept: "
+                        f"resume it with martian redteam run FILE --resume {run_id}",
+                    )
+                if earlier.state not in RESUMABLE and not self._orphan(earlier):
+                    raise HTTPException(409, RESUME_STATE_DETAIL.format(state=earlier.state))
+                request = RunStart(project_id=project_id, run_file=launch["run_file"], request_id=run_id)
+                return await self._launch(
+                    principal, request, launch.get("target_id"), lease, earlier, recover_interrupted=exclusive
+                )
+        except _ActiveSession:
+            # A completed checkpoint can be visible while its session is still closing.
+            record = await self.store.records.get_run(principal, project_id, run_id)
             if (
-                earlier.provenance.get("execution") == CLIENT_EXECUTED
-                or not isinstance(launch, dict)
-                or not isinstance(launch.get("run_file"), dict)
+                record is not None
+                and record.kind == "redteam"
+                and record.state == "completed"
+                and _saved_local_launch(redteam_header(record).get("provenance")) is not None
             ):
-                raise HTTPException(
-                    409,
-                    "This run was not started here, so its run file is not kept: "
-                    f"resume it with martian redteam run FILE --resume {run_id}",
-                )
-            if earlier.state not in RESUMABLE and not self._orphan(earlier):
-                raise HTTPException(
-                    409, f"Only a stopped, cancelled or failed run can be resumed; this one is {earlier.state}"
-                )
-            request = RunStart(project_id=project_id, run_file=launch["run_file"], request_id=run_id)
-            return await self._launch(
-                principal, request, launch.get("target_id"), lease, earlier, recover_interrupted=exclusive
-            )
+                raise HTTPException(409, RESUME_STATE_DETAIL.format(state=record.state)) from None
+            raise
 
     async def close(self) -> None:
         """Cancel every run still going."""
