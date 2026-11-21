@@ -22,6 +22,7 @@ from martian.evals.promptfoo_convert import (
     UNSUPPORTED,
     PromptfooConfigError,
     convert_promptfoo_config,
+    recorded_checks,
     write_conversion,
 )
 from martian.evals.promptfoo_import import promptfoo_runs, read_promptfoo_results
@@ -39,14 +40,13 @@ SAMPLE_UNCONVERTED = [
     "evaluateOptions",
     "providers[0] mini (openai:gpt-4.1-mini)",
     "providers[1] agent (file://agent.py)",
-    "tests[0].assert[1].weight",
     "tests[0].assert[2] llm-rubric",
+    "tests[0].assert[1].weight",
     "tests[1].assert[2] llm-rubric",
     "tests[2].assert[2] llm-rubric",
     "tests[2].assert[3] similar",
-    "tests[3].assert[2] contains-json",
     "tests[4].assert[2] javascript",
-    "tests[4].assert[3].metric",
+    "tests[4]",
 ]
 
 
@@ -67,6 +67,84 @@ def config_file(folder: Path, config: dict) -> Path:
     return path
 
 
+def test_derived_metrics_keep_prompt_columns_and_recompute_from_reused_results(tmp_path):
+    out = tmp_path / "converted"
+    source = config_file(
+        tmp_path,
+        {
+            "prompts": ["Rail: {{ stop }}", "Walking: {{ stop }}"],
+            "providers": ["echo"],
+            "defaultTest": {
+                "assert": [
+                    {"type": "contains", "value": "Rail", "metric": "label", "weight": 2},
+                    {"type": "contains", "value": "park", "metric": "label", "weight": 0},
+                ]
+            },
+            "tests": [{"vars": {"stop": name}} for name in ("park", "station")],
+            "derivedMetrics": [
+                {"name": "mean_points", "value": "label / __count"},
+                {"name": "normalized", "value": "mean_points > 1 ? mean_points / 3 : 0"},
+            ],
+        },
+    )
+    write_conversion(convert_promptfoo_config(source, output=out), out, strict=True)
+    path = out / "evals.yaml"
+    home = tmp_path / "evals-home"
+    first = run_suite(path, home=home)
+    assert {(row["group"], row["name"]): (row["cases"], row["score"]) for row in first["derived_metrics"]} == {
+        ("Prompt 1", "mean_points"): (2, 2.5),
+        ("Prompt 1", "normalized"): (2, 2.5 / 3),
+        ("Prompt 2", "mean_points"): (2, 0.5),
+        ("Prompt 2", "normalized"): (2, 0),
+    }
+    results = out / "results" / "results.jsonl"
+    saved = results.read_bytes()
+    config = yaml.safe_load(path.read_text())
+    config["derived_metrics"]["formulas"][1]["value"] = "mean_points * 2"
+    path.write_text(yaml.safe_dump(config))
+
+    messages = []
+    second = run_suite(path, home=home, progress=messages.append)
+    assert not any("cases graded" in message for message in messages)
+    assert results.read_bytes() == saved
+    assert [row["score"] for row in second["derived_metrics"] if row["name"] == "normalized"] == [5, 1]
+
+
+def test_strict_conversion_keeps_each_cases_checks_and_rolls_up_the_whole_prompt(tmp_path):
+    out = tmp_path / "converted"
+    source = config_file(
+        tmp_path,
+        {
+            "prompts": ["Rail"],
+            "providers": ["echo"],
+            "tests": [
+                {"assert": [{"type": "equals", "value": "Rail", "metric": "quality"}]},
+                {"assert": [{"type": "contains", "value": "Rail", "metric": "quality", "weight": 2}]},
+                {"assert": [{"type": "contains", "value": "Bus", "metric": "quality"}]},
+            ],
+            "derivedMetrics": [{"name": "average", "value": "quality / __count"}],
+        },
+    )
+    conversion = convert_promptfoo_config(source, output=out)
+    write_conversion(conversion, out, strict=True)
+    (one,) = conversion.suites
+    assert one.tests == (0, 1, 2)
+    path = out / one.suite_file
+    suite, _ = load_suite_file(path)
+    assert [selected.cases for selected in suite.check_sets] == [("test 1",), ("test 2",), ("test 3",)]
+    assert suite.check_sets[2].aliases == {"contains_set_3": "contains"}
+    found = run_suite(path, home=tmp_path / "evals-home")
+    assert (found["passed"], found["failed"], found["errors"]) == (2, 1, 0)
+    records = [json.loads(line) for line in (out / "results" / "results.jsonl").read_text().splitlines()]
+    assert [list(row["checks"]) for row in records] == [
+        ["equals", "case_gate"],
+        ["contains", "case_gate"],
+        ["contains_set_3", "case_gate"],
+    ]
+    (average,) = found["derived_metrics"]
+    assert (average["score"], average["cases"], average["group"]) == (1, 3, "Prompt 1")
+
+
 def test_the_sample_config_converts_and_its_suites_run_against_a_function(tmp_path):
     out = tmp_path / "converted"
     conversion = convert_promptfoo_config(CONFIG, output=out, target=TARGET)
@@ -77,7 +155,7 @@ def test_the_sample_config_converts_and_its_suites_run_against_a_function(tmp_pa
     common = ("not_icontains", "not_regex", "latency")
     assert [(s.suite_file, s.data_file, s.tests, s.checks) for s in conversion.suites] == [
         ("evals.yaml", "cases.jsonl", (0, 1, 2), (*common, "starts_with", "icontains")),
-        ("evals-2.yaml", "cases-2.jsonl", (3,), (*common, "is_json", "contains_all")),
+        ("evals-2.yaml", "cases-2.jsonl", (3,), (*common, "is_json", "contains_all", "contains_json")),
         ("evals-3.yaml", "cases-3.jsonl", (4,), (*common, "is_json", "contains_all", "cost")),
     ]
     assert [f"{note.where} {note.what}".strip() for note in conversion.unconverted] == SAMPLE_UNCONVERTED
@@ -91,17 +169,28 @@ def test_the_sample_config_converts_and_its_suites_run_against_a_function(tmp_pa
     assert first["target"]["function"] == "answer" and not Path(first["target"]["file"]).is_absolute()
     assert (out / first["target"]["file"]).resolve() == EXAMPLE / "agent.py"
     assert first["checks"] == [
-        {"type": "not_contains", "name": "not_icontains", "values": ["as an AI language model"]},
-        {"type": "not_matches", "name": "not_regex", "pattern": r"\b(?:sorry|apologi[sz]e)\b"},
+        {
+            "type": "not_contains",
+            "name": "not_icontains",
+            "values": ["as an AI language model"],
+            "case_mapping": "lower",
+        },
+        {"type": "not_matches", "name": "not_regex", "pattern": r"(?a)\b(?:sorry|apologi[sz]e)\b"},
         {"type": "latency", "max_ms": 3000},
         {"type": "matches", "name": "starts_with", "pattern": r"\AThe capital of"},
-        {"type": "contains", "name": "icontains", "expectation": "icontains_values"},
+        {"type": "contains", "name": "icontains", "expectation": "icontains_values", "case_mapping": "lower"},
     ]
     second = yaml.safe_load((out / "evals-2.yaml").read_text(encoding="utf-8"))
     # {{traveller}} in an assertion's value is filled from the test's vars, as promptfoo does.
     assert second["checks"][3:] == [
-        {"type": "is_json", "required_keys": ["city", "traveller", "stops"]},
+        {
+            "type": "json_schema",
+            "name": "is_json",
+            "schema": {"type": "object", "required": ["city", "traveller", "stops"]},
+            "plain_json": True,
+        },
         {"type": "contains", "name": "contains_all", "values": ["Louvre", "Sam"], "case_sensitive": True},
+        {"type": "json_schema", "name": "contains_json", "schema": {}, "embedded": "promptfoo"},
     ]
     assert second["output"] == "results-2"
     third = yaml.safe_load((out / "evals-3.yaml").read_text(encoding="utf-8"))
@@ -136,26 +225,223 @@ def test_the_sample_config_converts_and_its_suites_run_against_a_function(tmp_pa
     assert all((out / folder / "summary.json").exists() for folder in ("results", "results-2", "results-3"))
 
 
-def test_llm_rubric_becomes_the_rubric_judge_on_the_judge_model(tmp_path):
+def test_llm_rubric_becomes_a_scored_rubric_on_the_judge_model(tmp_path):
     out = tmp_path / "converted"
     conversion = convert_promptfoo_config(CONFIG, output=out, target=TARGET, judge_model="openai:/judge-model")
     write_conversion(conversion, out)
-    suite, cases = load_suite_file(out / "evals.yaml")
+    weighted, _ = load_suite_file(out / conversion.suites[0].suite_file)
+    assert weighted.case_gate.weights == {"icontains": 2.0}
+    assert weighted.scorers[-1].criteria == {"rubric": "Names Paris as the capital of France"}
+
+    suite, cases = load_suite_file(out / conversion.suites[1].suite_file)
     rubric = suite.scorers[-1]
     assert (rubric.name, rubric.kind, rubric.type, rubric.model, rubric.criteria) == (
         "llm_rubric",
         "llm_judge",
-        "rubric",
+        "scored_rubric",
         "openai:/judge-model",
-        {},
+        {"expectation": "llm_rubric_rubric"},
     )
     # Each test's rubric differs, so each case carries its own.
-    assert [case.expectations["rubric"] for case in cases] == [
-        "Names Paris as the capital of France",
+    assert [case.expectations["llm_rubric_rubric"] for case in cases] == [
         "Names Tokyo as the capital of Japan",
         "Names Lisbon as the capital of Portugal",
     ]
     assert not any(note.what == "llm-rubric" for note in conversion.unconverted)
+    assert any("uses the SDK grading prompt" in note.why for note in conversion.strict_blockers)
+
+
+def test_conversion_keeps_weights_for_multiple_scored_rubrics_in_an_assertion_set(tmp_path):
+    assertions = [
+        {"type": "llm-rubric", "value": "Includes the date", "threshold": 0.6, "weight": 3},
+        {"type": "llm-rubric", "value": "Acknowledges the recipient"},
+        {"type": "not-llm-rubric", "value": "Includes irrelevant text", "threshold": 0},
+    ]
+    config = config_file(
+        tmp_path,
+        {
+            "prompts": ["Summarize the meeting"],
+            "tests": [
+                {
+                    "threshold": 0.7,
+                    "providerOutput": "The meeting is Tuesday.",
+                    "assert": [{"type": "assert-set", "threshold": 0.8, "assert": assertions}],
+                },
+            ],
+        },
+    )
+    out = tmp_path / "out"
+    conversion = convert_promptfoo_config(config, output=out, judge_model="openai:/fixture")
+    write_conversion(conversion, out)
+    suite, _ = load_suite_file(out / "evals.yaml")
+    assert conversion.unconverted == []
+    assert len(conversion.strict_blockers) == 3
+    assert [scorer.criteria for scorer in suite.scorers] == [
+        {"rubric": "Includes the date", "score_threshold": 0.6},
+        {"rubric": "Acknowledges the recipient"},
+        {"rubric": "Includes irrelevant text", "score_threshold": 0.0, "negate": True},
+    ]
+    assert suite.case_gate.weights == {"llm_rubric": 3.0}
+    assert suite.case_gate.assertion_sets[0].checks == ["llm_rubric", "llm_rubric_2", "not_llm_rubric"]
+
+
+def test_rubric_prompt_inheritance_and_files(tmp_path):
+    default = [{"role": "user", "content": "Grade {{ output }} on {{ rubric }} for {{ team }}"}]
+    test_prompt = "Return a grade for {{ output }}.\n"
+    assertion_prompt = [{"role": "user", "content": "Override: {{ output }}."}]
+    (tmp_path / "grader.txt").write_text(test_prompt, encoding="utf-8")
+    (tmp_path / "assertion.json").write_text(json.dumps(assertion_prompt), encoding="utf-8")
+    config = config_file(
+        tmp_path,
+        {
+            "prompts": ["Summarize the meeting"],
+            "providers": ["echo"],
+            "defaultTest": {
+                "options": {"rubricPrompt": default},
+                "assert": [{"type": "llm-rubric", "value": "Includes {{ topic }}"}],
+            },
+            "tests": [
+                {"vars": {"topic": "the date", "team": "Sales"}},
+                {"options": {"rubricPrompt": "file://grader.txt"}, "vars": {"topic": "the time"}},
+                {
+                    "options": {"rubricPrompt": "file://grader.txt", "disableDefaultAsserts": True},
+                    "assert": [{"type": "llm-rubric", "rubricPrompt": "file://assertion.json"}],
+                },
+                {"vars": {"topic": "the room", "team": "Support"}},
+            ],
+        },
+    )
+    out = tmp_path / "out"
+    conversion = convert_promptfoo_config(config, output=out, judge_model="openai:/fixture")
+    assert conversion.unconverted == []
+    assert len(conversion.strict_blockers) == 2
+    assert all("custom grading prompt and uses the SDK reply schema" in note.why for note in conversion.strict_blockers)
+    write_conversion(conversion, out)
+    assert [item.tests for item in conversion.suites] == [(0, 3), (1,), (2,)]
+    suites = [load_suite_file(out / item.suite_file) for item in conversion.suites]
+    assert suites[0][0].scorers[0].criteria == {"judge_prompt": default, "expectation": "llm_rubric_rubric"}
+    assert [case.expectations["llm_rubric_rubric"] for case in suites[0][1]] == [
+        "Includes the date",
+        "Includes the room",
+    ]
+    assert suites[1][0].scorers[0].criteria == {"judge_prompt": test_prompt, "rubric": "Includes the time"}
+    assert suites[2][0].scorers[0].criteria == {"judge_prompt": assertion_prompt, "rubric": ""}
+
+
+@pytest.mark.parametrize(
+    ("prompt", "problem"),
+    [
+        ("Grade {{ output | lower }}", "simple {{ name }} placeholders"),
+        ("file://grader.js", "literal local .txt, .md or .json file reference"),
+        ([{"role": "system", "content": "{{ output }}"}], "puts {{ output }} in a user message"),
+    ],
+)
+def test_conversion_reports_unsupported_grader_prompt_in_required_checks(tmp_path, prompt, problem):
+    config = config_file(
+        tmp_path,
+        {
+            "prompts": ["Summarize the meeting"],
+            "providers": ["echo"],
+            "tests": [
+                {
+                    "threshold": 0.75,
+                    "assert": [
+                        {"type": "llm-rubric", "value": "Includes the date", "rubricPrompt": prompt},
+                        {"type": "contains", "value": "meeting"},
+                    ],
+                }
+            ],
+        },
+    )
+    conversion = convert_promptfoo_config(config, output=tmp_path / "out", judge_model="openai:/fixture")
+    assert conversion.suites == []
+    assert any(problem in note.why for note in conversion.strict_blockers)
+    assert any("required score could not be preserved" in note.why for note in conversion.strict_blockers)
+
+
+def test_all_providers_preserve_the_scoped_test_and_prompt_matrix(tmp_path):
+    config = config_file(
+        tmp_path,
+        {
+            "providers": [
+                {"id": "echo", "label": "Sample:Short", "prompts": ["faq-short"]},
+                {"id": "echo", "label": "Sample:Wide", "prompts": ["FAQ:*"]},
+            ],
+            "prompts": [
+                {"id": "faq-full", "label": "FAQ:Full", "raw": "Full answer for {{subject}}"},
+                {"id": "faq-short", "label": "FAQ:Short", "raw": "Short answer for {{subject}}"},
+                {"id": "faq-extra", "label": "Detail", "raw": "Extra detail for {{subject}}"},
+            ],
+            "defaultTest": {
+                "providers": ["Sample"],
+                "prompts": ["FAQ"],
+                "assert": [{"type": "contains", "value": "{{subject}}"}],
+            },
+            "tests": [
+                {"vars": {"subject": "shipping"}},
+                {"vars": {"subject": "returns"}, "providers": ["Sample:Short"], "prompts": ["faq-short"]},
+                {"vars": {"subject": "warranty"}, "prompts": ["faq-full"]},
+                {"vars": {"subject": "receipt"}, "providers": []},
+                {"vars": {"subject": "help"}, "prompts": []},
+            ],
+        },
+    )
+    out = tmp_path / "out"
+    conversion = convert_promptfoo_config(config, output=out, all_providers=True)
+    assert conversion.strict_blockers == []
+    assert [suite.source_provider for suite in conversion.suites] == ["Sample:Short (echo)", "Sample:Wide (echo)"]
+    assert [suite.suite_file for suite in conversion.suites] == ["evals-provider-1.yaml", "evals-provider-2.yaml"]
+    write_conversion(conversion, out, strict=True)
+    short, short_cases = load_suite_file(out / "evals-provider-1.yaml")
+    wide, wide_cases = load_suite_file(out / "evals-provider-2.yaml")
+    assert (short.settings.output, wide.settings.output) == ("results-provider-1", "results-provider-2")
+    assert [case.id for case in short_cases] == ["test 1, prompt 2", "test 2, prompt 2"]
+    assert [case.id for case in wide_cases] == ["test 1, prompt 1", "test 1, prompt 2", "test 3, prompt 1"]
+    assert [case.outputs for case in wide_cases] == [
+        "Full answer for shipping",
+        "Short answer for shipping",
+        "Full answer for warranty",
+    ]
+    one = convert_promptfoo_config(config, output=out, provider="Sample:Wide")
+    assert not one.strict_blockers
+    assert one.suites[0].data == conversion.suites[1].data
+
+
+@pytest.mark.parametrize("field", ["providers", "prompts"])
+def test_a_scope_typo_is_reported_before_writing_cases(tmp_path, field):
+    config = config_file(
+        tmp_path,
+        {
+            "prompts": [{"id": "brief", "raw": "Send a brief reply"}],
+            "providers": ["echo"],
+            "tests": [{"assert": [{"type": "contains", "value": "reply"}], field: ["mistyped"]}],
+        },
+    )
+    out = tmp_path / "out"
+    result = CliRunner().invoke(
+        app, ["evals", "convert", "promptfoo", str(config), "--all-providers", "--output", str(out)]
+    )
+    assert result.exit_code == 2 and f"tests[0].{field}" in result.output
+    assert not out.exists()
+
+
+def test_strict_all_providers_does_not_write_an_incomplete_matrix(tmp_path):
+    config = config_file(
+        tmp_path,
+        {
+            "prompts": ["An offline fixture"],
+            "providers": ["echo", "openai:other-model"],
+            "tests": [{"assert": [{"type": "contains", "value": "fixture"}]}],
+        },
+    )
+    out = tmp_path / "out"
+    cli = ["evals", "convert", "promptfoo", str(config), "--all-providers", "--output", str(out)]
+    strict = CliRunner().invoke(app, [*cli, "--strict"])
+    assert strict.exit_code == 2 and "providers[1]" in strict.output
+    assert not out.exists()
+    partial = CliRunner().invoke(app, cli)
+    assert partial.exit_code == 0 and "has no native SDK mapping" in partial.output
+    assert sorted(p.name for p in out.iterdir()) == ["cases-provider-1.jsonl", "evals-provider-1.yaml"]
 
 
 def test_without_a_target_the_suite_grades_each_tests_provider_output(tmp_path):
@@ -210,9 +496,15 @@ VERDICTS = [
     ({"type": "contains", "value": "Paris"}, "paris, France", False),
     ({"type": "contains", "value": 42}, "The answer is 42.", True),
     ({"type": "icontains", "value": "PARIS"}, "paris", True),
+    ({"type": "icontains", "value": "STRASSE"}, "Straße", False),
     ({"type": "contains-any", "value": ["Rome", "Paris"]}, "Paris", True),
     ({"type": "contains-any", "value": "Rome, Oslo"}, "Paris", False),
     ({"type": "contains-all", "value": "Paris, France"}, "Paris", False),
+    (
+        {"type": "contains-all", "value": r',,"Paris, France", "say \"bonjour\"", " rue "'},
+        'Paris, France. say "bonjour" on the rue .',
+        True,
+    ),
     ({"type": "icontains-all", "value": ["paris", "FRANCE"]}, "Paris, France", True),
     ({"type": "not-contains", "value": "secret"}, "The Secret is safe", True),
     ({"type": "not-icontains", "value": "secret"}, "The Secret is safe", False),
@@ -220,19 +512,56 @@ VERDICTS = [
     ({"type": "not-icontains-any", "value": ["KEY", "TOKEN"]}, "nothing to see", True),
     ({"type": "regex", "value": r"^\d{3}$"}, "123", True),
     ({"type": "regex", "value": r"^\d{3}$"}, "1234", False),
+    ({"type": "regex", "value": r"^\d{3}$"}, "١٢٣", False),
+    ({"type": "regex", "value": r"^\d{3}$"}, "123\n", False),
     ({"type": "not-regex", "value": "error"}, "all good", True),
     ({"type": "equals", "value": "JPY"}, "JPY", True),
     ({"type": "equals", "value": "JPY"}, "JPY.", False),
     ({"type": "equals", "value": "a+b (c)"}, "a+b (c)", True),
     ({"type": "equals", "value": 3.0}, "3", True),
+    ({"type": "equals", "value": {"a": [True, 1], "b": "Lyon"}}, '{"b":"Lyon","a":[true,1.0]}', True),
+    ({"type": "not-equals", "value": [1, True]}, "[1, 1]", True),
+    ({"type": "not-equals", "value": {"a": 1}}, "not json", True),
     ({"type": "not-equals", "value": "JPY"}, "EUR", True),
     ({"type": "starts-with", "value": "The"}, "The end", True),
     ({"type": "starts-with", "value": "The"}, "the end", False),
     ({"type": "not-starts-with", "value": "Sorry"}, "Sorry, no", False),
     ({"type": "is-json"}, '{"a": 1}', True),
     ({"type": "is-json"}, "not json", False),
+    ({"type": "is-json"}, '```json\n{"a": 1}\n```', False),
+    ({"type": "is-json"}, '{"a": NaN}', False),
+    ({"type": "not-is-json"}, "not json", True),
+    ({"type": "not-is-json", "value": {"type": "array"}}, "[]", False),
     ({"type": "is-json", "value": {"type": "object", "required": ["a"]}}, '{"b": 1}', False),
     ({"type": "is-json", "value": {"required": ["a"]}}, '{"a": 1}', True),
+    ({"type": "is-json", "value": {"required": ["a"]}}, "[]", True),
+    ({"type": "contains-json"}, "[1, 2, 3]", False),
+    (
+        {"type": "contains-json", "value": {"required": ["latitude"]}},
+        'Map: {"note":"Closed } gate"} {"latitude":14.6}',
+        True,
+    ),
+    (
+        {"type": "not-contains-json", "value": {"required": ["latitude"]}},
+        'Map: {"point":{"latitude":14.6}}',
+        True,
+    ),
+    ({"type": "not-contains-json"}, "Map: {label: 'West Gate'", False),
+    ({"type": "is-xml", "value": "catalog.title, catalog.author"}, "<catalog><title/><author/></catalog>", True),
+    ({"type": "not-is-xml"}, "Note <catalog/> and more text", True),
+    (
+        {"type": "contains-xml", "value": {"requiredElements": ["catalog.book.1.title"]}},
+        "Read: <catalog><book/><book><title>Atlas</title></book></catalog>",
+        True,
+    ),
+    ({"type": "not-contains-xml", "value": ["catalog.author"]}, "Note: <catalog><title/></catalog>", True),
+    ({"type": "levenshtein", "value": "kitten"}, "sitting", True),
+    ({"type": "levenshtein", "value": "Ada", "threshold": 0}, "ada", False),
+    ({"type": "levenshtein", "value": "", "threshold": 1}, "🗺", False),
+    ({"type": "not-levenshtein", "value": "Ada", "threshold": 0.9}, "Ad", True),
+    ({"type": "word-count", "value": 0}, "\t \ufeff\n", True),
+    ({"type": "word-count", "value": {"min": 2, "max": 3}}, "north\ufeffeast", True),
+    ({"type": "not-word-count", "value": {"max": 1}}, "north\x85east", False),
 ]
 
 
@@ -241,16 +570,67 @@ def test_each_converted_assertion_decides_as_promptfoo_does(tmp_path, assertion,
     config = config_file(tmp_path, {"prompts": ["{{q}}"], "tests": [{"vars": {"q": "?"}, "assert": [assertion]}]})
     out = tmp_path / "out"
     conversion = convert_promptfoo_config(config, output=out, target=TARGET)
-    assert conversion.unconverted == [] and len(conversion.suites) == 1
-    write_conversion(conversion, out)
+    assert conversion.strict_blockers == [] and len(conversion.suites) == 1
+    write_conversion(conversion, out, strict=True)
     suite, base = runner.load_suite(out / "evals.yaml")
     _, cases = load_suite_file(out / "evals.yaml")
     (check,) = runner._build_scorers(suite, base)
     (spec,) = suite.checks
-    assert spec.type == ASSERTION_CHECKS[assertion["type"]]
+    expected_check = ASSERTION_CHECKS[assertion["type"]]
+    if assertion["type"] in ("equals", "not-equals", "is-json") and isinstance(assertion.get("value"), dict | list):
+        expected_check = "json_schema"
+    assert spec.type == expected_check
     expectations = cases[0].expectations
     feedback = check(outputs=reply, expectations=expectations) if spec.expectation else check(outputs=reply)
     assert feedback.value is verdict
+
+
+def test_json_unicode_escapes_preserve_text_in_written_suites(tmp_path):
+    source = tmp_path / "promptfooconfig.yaml"
+    label = "🗺\x85map"
+    source.write_text(
+        json.dumps(
+            {
+                "prompts": ["Map legend"],
+                "providers": ["echo"],
+                "tests": [
+                    {"providerOutput": label, "assert": [{"type": "levenshtein", "value": label, "threshold": 0}]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "converted"
+    write_conversion(convert_promptfoo_config(source, output=out), out, strict=True)
+    suite, (case,) = load_suite_file(out / "evals.yaml")
+    assert case.outputs == label and suite.scorers[0].parameters["values"] == [label]
+
+
+def test_csv_edit_distance_shorthand_preserves_its_default_and_explicit_threshold(tmp_path):
+    (tmp_path / "distances.csv").write_text(
+        "__providerOutput,__expected\nPariss,levenshtein:Paris\nPariss,levenshtein(1):Paris\n", encoding="utf-8"
+    )
+    source = config_file(tmp_path, {"prompts": ["Map label"], "providers": ["echo"], "tests": "distances.csv"})
+    out = tmp_path / "converted"
+    write_conversion(convert_promptfoo_config(source, output=out), out, strict=True)
+    suites = [load_suite_file(out / filename)[0] for filename in ("evals.yaml", "evals-2.yaml")]
+    assert [suite.scorers[0].parameters["max_edits"] for suite in suites] == [0, 1]
+
+
+def test_schema_file_is_pinned_during_conversion_and_stays_unverified_in_archives(tmp_path):
+    schema = tmp_path / "map-schema.yaml"
+    schema.write_text("type: object\nrequired: [city]\n", encoding="utf-8")
+    assertion = {"type": "contains-json", "value": "file://map-schema.yaml"}
+    source = config_file(
+        tmp_path,
+        {"prompts": ["Map label"], "providers": ["echo"], "tests": [{"assert": [assertion]}]},
+    )
+    out = tmp_path / "converted"
+    write_conversion(convert_promptfoo_config(source, output=out), out, strict=True)
+    schema.write_text("type: object\nrequired: [country]\n", encoding="utf-8")
+    converted, _ = load_suite_file(out / "evals.yaml")
+    assert converted.scorers[0].parameters["schema"] == {"type": "object", "required": ["city"]}
+    assert recorded_checks([assertion], None, {}) is None
 
 
 @pytest.mark.parametrize(
@@ -268,7 +648,11 @@ def test_each_converted_assertion_decides_as_promptfoo_does(tmp_path, assertion,
         ({"type": "trajectory:tool-args-match", "value": {"name": "a"}}, "(add tool_called by hand to use it)"),
         ({"type": "trajectory:tool-sequence", "value": ["a", "b"]}, "in parallel in one turn are in order"),
         ({"type": "finish-reason", "value": "stop"}, "reads the provider's trace or metadata"),
-        ({"type": "contains-json"}, "contains-json: finds JSON inside other text"),
+        ({"type": "contains-json", "value": "file://schema.js"}, "needs a literal local .json, .yaml or .yml schema"),
+        ({"type": "is-xml", "value": {"requiredElements": "catalog"}}, "needs an object with a requiredElements list"),
+        ({"type": "levenshtein", "value": "Paris", "threshold": True}, "levenshtein: needs a finite nonnegative"),
+        ({"type": "word-count", "value": {"min": 2, "max": 1}}, "word-count: has a min greater than max"),
+        ({"type": "word-count", "value": 1.5}, "word-count: needs whole-number counts"),
         ({"type": "is-refusal"}, "is-refusal: passes only a refusal; no built-in check does"),
         ({"type": "not-is-refusal"}, "so the two decide some replies differently (add no_refusal by hand"),
         ({"type": "promptfoo:redteam:pii"}, "(add no_personal_data by hand to use it)"),
@@ -286,12 +670,15 @@ def test_each_converted_assertion_decides_as_promptfoo_does(tmp_path, assertion,
         ({"type": "not-contains-all", "value": ["a", "b"]}, "not-contains-all: passes when contains-all fails"),
         ({"type": "made-up"}, "made-up: is not an assertion type in promptfoo's documented list"),
         ({"type": "icontains", "value": "a", "transform": "output.trim()"}, ".transform: transforms the reply"),
-        ({"type": "llm-rubric", "value": "Polite", "threshold": 0.8}, ".threshold: sets a score threshold"),
-        ({"type": "equals", "value": {"a": 1}}, "equals: compares JSON values; no built-in check does"),
+        ({"type": "llm-rubric", "value": "Polite", "threshold": "high"}, "llm-rubric: needs a finite"),
         ({"type": "equals", "value": "file://expected.json"}, "equals: reads its value from a file"),
         ({"type": "regex", "value": "(?<name>x)"}, "regex: is not a regular expression Python reads"),
         ({"type": "icontains", "value": "{{ name | upper }}"}, "icontains: uses Nunjucks beyond"),
-        ({"type": "is-json", "value": {"type": "object", "properties": {"a": {}}}}, "is-json: validates a JSON schema"),
+        (
+            {"type": "is-json", "value": {"type": "object", "properties": {"a": {"format": "email"}}}},
+            "is-json: enforces a schema format",
+        ),
+        ({"type": "is-json", "value": {"type": "string", "pattern": r"^\w+$"}}, "is-json: uses a schema pattern"),
     ],
     ids=lambda value: str(value)[:40],
 )
@@ -315,7 +702,7 @@ def test_every_documented_type_converts_or_has_a_reason():
     assert {"equals", "contains", "icontains", "regex", "is-json", "llm-rubric", "latency", "cost"} <= set(
         ASSERTION_CHECKS
     )
-    assert {"javascript", "contains-json", "similar", "python", "is-refusal", "not-is-refusal"} <= set(UNSUPPORTED)
+    assert {"javascript", "is-html", "similar", "python", "is-refusal", "not-is-refusal"} <= set(UNSUPPORTED)
     # No reason says custom code or tool calls have no equivalent: both name the check to use, and
     # none says it is still to come. No tool-call assertion matches a check exactly, so none converts.
     for kind in ("javascript", "python", "ruby", "webhook"):
@@ -355,13 +742,11 @@ def test_latency_and_cost_limit_the_targets_call_as_promptfoo_does(tmp_path, ass
     )
     out = tmp_path / "out"
     conversion = convert_promptfoo_config(config, output=out, target=TARGET)
-    # The metric is listed; the threshold is the check's limit, not a score threshold.
-    assert [note.line() for note in conversion.unconverted] == [
-        "tests[0].assert[0].metric: names a promptfoo metric; the check is named after the assertion's type"
-    ]
+    assert conversion.unconverted == []
     write_conversion(conversion, out)
     suite, base = runner.load_suite(out / "evals.yaml")
     (spec,) = suite.checks
+    assert suite.case_gate is not None and suite.case_gate.metrics == {spec.label: "m"}
     limit = CALL_CHECKS[assertion["type"]]
     assert (spec.type, getattr(spec, limit)) == (assertion["type"], assertion["threshold"])
     (check,) = runner._build_scorers(suite, base)
@@ -411,7 +796,6 @@ def test_tests_options_and_prompts_that_do_not_convert_are_listed(tmp_path):
             "tests": [
                 {
                     "vars": {"q": "a"},
-                    "threshold": 0.5,
                     "metadata": {"k": "v"},
                     "assert": [{"type": "contains", "value": "a"}],
                 },
@@ -432,7 +816,6 @@ def test_tests_options_and_prompts_that_do_not_convert_are_listed(tmp_path):
         "defaultTest.options.transform: transforms the reply before the assertions; the suite's checks see the "
         "reply as the target returns it",
         "tests[0].metadata: a suite's data file has no place for case metadata",
-        "tests[0].threshold: passes the test on a weighted score; a suite's case passes when every check passes",
         "tests[1].vars.q: is a list, which promptfoo runs once per value; the test is not converted",
         "tests[2].vars.q: is read from a file, which this converter does not read; the test is not converted",
         "tests[3].assert[0] javascript: " + UNSUPPORTED["javascript"],
@@ -486,3 +869,175 @@ def test_the_command_writes_the_suites_and_prints_what_it_left_out(tmp_path):
     empty = CliRunner().invoke(app, ["evals", "convert", "promptfoo", str(CONFIG), "--output", str(tmp_path / "none")])
     assert empty.exit_code == 2 and "Nothing written: no test converts." in empty.output
     assert not (tmp_path / "none").exists()
+
+
+def test_strict_cli_reports_omissions_and_approximations_without_writing(tmp_path):
+    config = config_file(
+        tmp_path,
+        {
+            "prompts": ["{{reply}}"],
+            "providers": ["echo"],
+            "tests": [
+                {
+                    "vars": {"reply": "Ottawa"},
+                    "assert": [
+                        {"type": "contains", "value": "Ottawa"},
+                        {"type": "regex", "value": r"^Ott.*"},
+                        {"type": "is-html"},
+                    ],
+                },
+            ],
+        },
+    )
+    out = tmp_path / "converted"
+    args = ["evals", "convert", "promptfoo", str(config), "--output", str(out)]
+    result = CliRunner().invoke(app, [*args, "--strict"])
+    assert result.exit_code == 2, result.output
+    assert "tests[0].assert[2] is-html" in result.output
+    assert "tests[0].assert[1] regex: uses regex syntax outside the portable subset" in result.output
+    assert not out.exists()
+    preview = CliRunner().invoke(app, [*args, "--dry-run"])
+    assert preview.exit_code == 0 and "Would write" in preview.output and not out.exists()
+    assert CliRunner().invoke(app, args).exit_code == 0
+    suite = (out / "evals.yaml").read_text(encoding="utf-8")
+    assert "# - tests[0].assert[2] is-html" in suite
+    assert "# - tests[0].assert[1] regex: uses regex syntax outside the portable subset" in suite
+
+
+def test_file_backed_tests_order_and_default_assertions_are_preserved(tmp_path):
+    (tmp_path / "defaults.yaml").write_text("assert:\n  - type: contains\n    value: approved\n", encoding="utf-8")
+    (tmp_path / "dataset.yaml").write_text(
+        "- vars: {reply: on}\n  options: {disableDefaultAsserts: true}\n  assert: [{type: equals, value: 'on'}]\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "dataset.json").write_text('[{"vars":{"reply":"approved JSON"}}]', encoding="utf-8")
+    (tmp_path / "dataset.jsonl").write_text(
+        '\n{"vars":{"reply":"ignored"},"providerOutput":"approved JSONL"}\n', encoding="utf-8"
+    )
+    (tmp_path / "dataset.csv").write_text(
+        'reply,__providerOutput,__expected\nignored,"approved, csv","starts-with:approved"\n', encoding="utf-8"
+    )
+    config = config_file(
+        tmp_path,
+        {
+            "prompts": ["{{reply}}"],
+            "targets": [{"id": "echo", "label": "offline"}, "other"],
+            "defaultTest": "file://defaults.yaml",
+            "tests": [
+                {"vars": {"reply": "approved inline\n"}},
+                "file://dataset.yaml",
+                "dataset.json",
+                "dataset.jsonl",
+                {"path": "dataset.csv"},
+            ],
+        },
+    )
+    out = tmp_path / "converted"
+    ambiguous = convert_promptfoo_config(config, output=out)
+    with pytest.raises(PromptfooConfigError, match="strict conversion"):
+        write_conversion(ambiguous, out, strict=True)
+    assert not out.exists()
+
+    conversion = convert_promptfoo_config(config, output=out, provider="offline")
+    assert not conversion.unconverted
+    write_conversion(conversion, out, strict=True)
+    row_text: dict[str, str] = {}
+    for suite in conversion.suites:
+        manifest, cases = load_suite_file(out / suite.suite_file)
+        assert manifest.target is not None and manifest.target.kind == "stored"
+        row_text.update((case.id, case.outputs) for case in cases)
+        summary = run_suite(out / suite.suite_file, home=tmp_path / "evals-home")
+        assert summary["passed"] == suite.cases and summary["failed"] == summary["errors"] == 0
+    assert row_text == {
+        "test 1": "approved inline",
+        "test 2": "on",
+        "test 3": "approved JSON",
+        "test 4": "approved JSONL",
+        "test 5": "approved, csv",
+    }
+
+
+def test_malformed_source_has_a_file_and_line_diagnostic(tmp_path):
+    config = config_file(tmp_path, {"prompts": ["plain"], "providers": ["echo"], "tests": "data.yaml"})
+    (tmp_path / "data.yaml").write_text("- vars:\n    city: Oslo\n    city: Paris\n", encoding="utf-8")
+    with pytest.raises(PromptfooConfigError, match="data.yaml: invalid YAML at line 3: duplicate mapping key"):
+        convert_promptfoo_config(config, output=tmp_path / "converted")
+
+
+def test_weighted_conversion_inherits_threshold_and_preserves_assertion_set_scores(tmp_path):
+    checks = [
+        {"type": "equals", "value": "answer", "weight": 0},
+        {
+            "type": "assert-set",
+            "threshold": 0.8,
+            "weight": 2,
+            "assert": [
+                {"type": "contains", "value": "correct", "weight": 3},
+                {"type": "contains", "value": "extra"},
+            ],
+        },
+        {"type": "starts-with", "value": "correct"},
+    ]
+    config = config_file(
+        tmp_path,
+        {
+            "prompts": ["{{text}}"],
+            "providers": ["echo"],
+            "defaultTest": {
+                "threshold": 0.8,
+                "assert": [{"type": "contains", "value": "default assertion to omit"}],
+            },
+            "tests": [
+                {
+                    "vars": {"text": "correct"},
+                    "options": {"disableDefaultAsserts": True},
+                    "assert": checks,
+                },
+                {
+                    "vars": {"text": "correct"},
+                    "threshold": 0.9,
+                    "options": {"disableDefaultAsserts": True},
+                    "assert": checks,
+                },
+            ],
+        },
+    )
+    out = tmp_path / "converted"
+    conversion = convert_promptfoo_config(config, output=out)
+    write_conversion(conversion, out, strict=True)
+    assert [suite.tests for suite in conversion.suites] == [(0,), (1,)]
+    for converted, expected, threshold in zip(conversion.suites, (True, False), (0.8, 0.9), strict=True):
+        path = out / converted.suite_file
+        suite, _ = load_suite_file(path)
+        assert suite.case_gate is not None and suite.case_gate.threshold == threshold
+        assert suite.case_gate.weights == {"equals": 0, "contains": 3}
+        assert suite.case_gate.assertion_sets[0].checks == ["contains", "contains_2"]
+        summary = run_suite(path, home=tmp_path / "evals-home")
+        record = json.loads((Path(summary["output"]) / "results.jsonl").read_text(encoding="utf-8"))
+        assert record["passed"] is expected
+        assert record["checks"]["equals"]["passed"] is False
+        assert record["checks"]["case_gate"]["value"] == pytest.approx(5 / 6)
+        assert record["checks"]["case_gate"]["metadata"]["assertion_sets.assert_set.score"] == "0.75"
+
+
+def test_partial_weighted_cases_cannot_turn_into_weaker_gates(tmp_path):
+    config = config_file(
+        tmp_path,
+        {
+            "prompts": ["matches"],
+            "providers": ["echo"],
+            "tests": [
+                {
+                    "threshold": 0.5,
+                    "assert": [{"type": "equals", "value": "matches"}, {"type": "is-html", "weight": 3}],
+                },
+                {"assert": [{"type": "equals", "value": "matches"}]},
+            ],
+        },
+    )
+    out = tmp_path / "converted"
+    conversion = convert_promptfoo_config(config, output=out)
+    assert [suite.tests for suite in conversion.suites] == [(1,)]
+    with pytest.raises(PromptfooConfigError, match="weighted test is skipped"):
+        write_conversion(conversion, out, strict=True)
+    assert not out.exists()

@@ -399,6 +399,19 @@ redteam_findings = Table(
 
 REDTEAM_TABLES = (redteam_probes, redteam_evidence, redteam_verifications, redteam_findings)
 
+# A triage entry belongs to a project finding that can occur in several runs.
+redteam_triage = Table(
+    "martian_redteam_triage",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(36), primary_key=True),
+    Column("finding_id", String(64), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("record", JSON, nullable=False),
+    Index("ix_martian_redteam_triage_finding", "space", "project_id", "finding_id", "created_at"),
+)
+
 TABLES = (
     runs,
     case_results,
@@ -423,4 +436,5 @@ TABLES = (
     dataset_manifests,
     deliveries,
     *REDTEAM_TABLES,
+    redteam_triage,
 )

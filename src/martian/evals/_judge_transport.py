@@ -355,6 +355,7 @@ def invoke_response_judge(
     cache: ModelCallCache | None = None,
     judge_version: str = "",
     address_policy: AddressPolicy | None = None,
+    full_reply: bool = False,
 ) -> Feedback:
     """One judge stage's request and its validated judgment (:func:`invoke_structured`).
     ``endpoint`` is the base address of the OpenAI-compatible endpoint that serves an ``openai:/``
@@ -367,7 +368,8 @@ def invoke_response_judge(
     judge that built the prompt) and replayed for the same request in a later run. The model, the
     endpoint and the key are checked first, as without the cache. A failure is raised as without
     the cache and never stored. A replayed judgment's metadata says so (``martian.cache: hit``),
-    with no provider retries, token counts or cost, since no call was made."""
+    with no provider retries, token counts or cost, since no call was made.
+    Set full_reply for schemas whose verdict isn't wrapped in a result field."""
     caller = f"Judge {stage}"
 
     def fresh() -> Feedback:
@@ -384,9 +386,10 @@ def invoke_response_judge(
             endpoint=endpoint,
             address_policy=address_policy,
         )
+        fields = judgment.model_dump(by_alias=full_reply, exclude_unset=full_reply)
         return Feedback(
             name=assessment_name,
-            value=judgment.model_dump()["result"],
+            value=fields if full_reply else fields["result"],
             source=AssessmentSource(source_type=AssessmentSourceType.LLM_JUDGE, source_id=model_uri),
             metadata=metadata,
         )
@@ -407,6 +410,8 @@ def invoke_response_judge(
         stage=stage,
         judge_version=judge_version,
     )
+    if full_reply:
+        request["full_reply"] = True
 
     def replay(stored: Any) -> Feedback:
         metadata = {**stored["metadata"], PROVIDER_RETRIES_KEY: 0, HIT_KEY: "hit"}

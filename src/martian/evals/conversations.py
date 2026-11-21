@@ -37,7 +37,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from martian.evals.repeats import combine
+from martian.evals.repeats import combine, combined_score
 
 SESSION_ID = "session_id"
 HISTORY = "history"
@@ -94,8 +94,12 @@ def _numbers(numbers: Sequence[int]) -> str:
 def over_turns(label: str, numbers: Sequence[int], turns: Mapping[int, Mapping[str, Any]]) -> dict[str, Any]:
     """A turn check's verdict on the conversation from its verdicts on the turns it grades: it passes
     when every one passed, fails when one failed, and is open otherwise (``all``, as for repeats)."""
-    verdicts = [turns[number]["checks"][label]["passed"] for number in numbers]
+    results = [turns[number]["checks"][label] for number in numbers]
+    verdicts = [result["passed"] for result in results]
     passed = combine(verdicts, "all")
+    score = combined_score(results)
+    if score.get("value", 0) is None:
+        passed = None
     text = f"{sum(verdict is True for verdict in verdicts)} of {len(verdicts)} turns passed"
     if failed := [number for number, verdict in zip(numbers, verdicts, strict=True) if verdict is False]:
         text += f", failed on {_numbers(failed)}"
@@ -105,6 +109,7 @@ def over_turns(label: str, numbers: Sequence[int], turns: Mapping[int, Mapping[s
         "passed": passed,
         "rationale": text if passed is not None else None,
         "error": None if passed is not None else f"the turns without a verdict leave it open: {text}",
+        **score,
     }
 
 

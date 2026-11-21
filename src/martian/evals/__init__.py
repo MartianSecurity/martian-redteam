@@ -20,9 +20,11 @@ from martian.evals.checks import (
     ends_with,
     equals,
     is_json,
+    is_xml,
     json_schema,
     latency,
     length,
+    levenshtein,
     matches,
     no_personal_data,
     no_prohibited_phrases,
@@ -42,6 +44,7 @@ from martian.evals.checks import (
     tool_called,
     tool_not_called,
     tool_trajectory,
+    word_count,
 )
 from martian.evals.config import KIT_VERSION as __version__
 from martian.evals.config import EvalsConfig
@@ -80,11 +83,13 @@ __all__ = [
     "evaluate",
     "groundedness",
     "is_json",
+    "is_xml",
     "json_schema",
     "judge_panel",
     "knowledge_retention",
     "latency",
     "length",
+    "levenshtein",
     "load_dataset",
     "matches",
     "no_personal_data",
@@ -110,4 +115,5 @@ __all__ = [
     "tool_called",
     "tool_not_called",
     "tool_trajectory",
+    "word_count",
 ]

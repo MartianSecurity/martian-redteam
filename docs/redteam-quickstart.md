@@ -107,6 +107,8 @@ martian ui
 It opens `http://127.0.0.1:7600` in your browser, on this machine only and with no login. The Red Team
 pages list your runs and show a run's report, each attempt with its conversation and checks, the
 findings across runs, where you can set a finding's status and comment, and the catalogue.
+See [local findings and remediation](redteam-findings.md) for cross-scan triage, filtered exports
+and remediation reports.
 
 ## Next
 

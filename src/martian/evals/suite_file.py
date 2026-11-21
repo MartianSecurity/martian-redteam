@@ -42,6 +42,7 @@ from pydantic import ValidationError
 
 from martian.config import ConfigError
 from martian.evals import runner
+from martian.evals.case_gate import case_check_index
 from martian.evals.conversations import graded_turns
 from martian.evals.model import (
     CacheSettings,
@@ -61,6 +62,19 @@ from martian.evals.model import (
 )
 from martian.evals.simulation import GOAL
 
+_GATE_FILE_FIELDS = {
+    "case_gate": "Suite.case_gate",
+    "case_gate.threshold": "CaseGate.threshold",
+    "case_gate.weights": "CaseGate.weights, keyed by check name",
+    "case_gate.metrics": "CaseGate.metrics, keyed by check name",
+    "case_gate.assertion_sets": "CaseGate.assertion_sets, in order",
+    "case_gate.assertion_sets.name": "AssertionSet.name",
+    "case_gate.assertion_sets.checks": "AssertionSet.checks, in order",
+    "case_gate.assertion_sets.threshold": "AssertionSet.threshold",
+    "case_gate.assertion_sets.weight": "AssertionSet.weight",
+    "case_gate.assertion_sets.metric": "AssertionSet.metric",
+}
+
 # Every field of a suite file, and where the model keeps it.
 SUITE_FILE_FIELDS = {
     "data": "Suite.dataset_location; Suite.dataset_name and Suite.dataset_digest from its cases",
@@ -71,6 +85,7 @@ SUITE_FILE_FIELDS = {
     "target.headers": "Target.headers (kind http), values as written",
     "target.body": "Target.body (kind http)",
     "target.response_path": "Target.response_path (kind http)",
+    "target.response_mode": "Target.response_mode (kind http)",
     "target.timeout_seconds": "RunSettings.target_timeout_seconds (a function or http target)",
     "judge": "The llm_judge scorers",
     "judge.model": "ScorerVersion.model of each llm_judge scorer without a panel",
@@ -89,15 +104,26 @@ SUITE_FILE_FIELDS = {
     "checks.conditions": "ScorerVersion.criteria.conditions",
     "checks.panel": "ScorerVersion.panel, a PanelMember for each model URI, in order",
     "checks.values": "ScorerVersion.parameters.values",
-    "checks.expectation": "ScorerVersion.parameters.expectation",
+    "checks.expectation": "ScorerVersion.criteria.expectation for scored_rubric, otherwise ScorerVersion.parameters",
+    "checks.judge_prompt": "ScorerVersion.criteria.judge_prompt for scored_rubric",
+    "checks.score_threshold": "ScorerVersion.criteria.score_threshold for scored_rubric",
     "checks.any_of": "ScorerVersion.parameters.any_of",
     "checks.case_sensitive": "ScorerVersion.parameters.case_sensitive",
+    "checks.case_mapping": "ScorerVersion.parameters.case_mapping",
     "checks.min_similarity": "ScorerVersion.parameters.min_similarity",
+    "checks.max_edits": "ScorerVersion.parameters.max_edits",
     "checks.pattern": "ScorerVersion.parameters.pattern",
     "checks.required_keys": "ScorerVersion.parameters.required_keys",
+    "checks.required_elements": "ScorerVersion.parameters.required_elements",
+    "checks.fragment": "ScorerVersion.parameters.fragment",
+    "checks.plain_json": "ScorerVersion.parameters.plain_json",
+    "checks.embedded": "ScorerVersion.parameters.embedded",
+    "checks.negate": "ScorerVersion.criteria.negate for scored_rubric, otherwise ScorerVersion.parameters",
     "checks.schema": "ScorerVersion.parameters.schema",
     "checks.min_length": "ScorerVersion.parameters.min_length",
     "checks.max_length": "ScorerVersion.parameters.max_length",
+    "checks.min_words": "ScorerVersion.parameters.min_words",
+    "checks.max_words": "ScorerVersion.parameters.max_words",
     "checks.max_ms": "ScorerVersion.parameters.max_ms",
     "checks.max_usd": "ScorerVersion.parameters.max_usd",
     "checks.max_tokens": "ScorerVersion.parameters.max_tokens",
@@ -130,6 +156,17 @@ SUITE_FILE_FIELDS = {
     "checks.options": "ScorerVersion.parameters.options (an installed check), as written, required: true included",
     "checks.combine": "Suite.repeats.checks, by the check's label",
     "checks.scope": "ScorerVersion.scope; left out when it is turn, the default",
+    **_GATE_FILE_FIELDS,
+    "check_sets": "Suite.check_sets, in order",
+    "check_sets.cases": "CaseChecks.cases, the ids of all cases that use this set",
+    "check_sets.checks": "CaseChecks.checks, in assertion order",
+    "check_sets.aliases": "CaseChecks.aliases, original labels for migration comparison",
+    **{f"check_sets.{name}": value.replace("Suite.", "CaseChecks.") for name, value in _GATE_FILE_FIELDS.items()},
+    "derived_metrics": "Suite.derived_metrics",
+    "derived_metrics.formulas": "DerivedMetrics.formulas, in evaluation order",
+    "derived_metrics.formulas.name": "Formula.name",
+    "derived_metrics.formulas.value": "Formula.value",
+    "derived_metrics.group_by": "DerivedMetrics.group_by",
     "repeats": "Suite.repeats.attempts",
     "combine": "Suite.repeats.combine",
     "matrix": "Suite.matrix, as written: each axis a list of values or a mapping of names to values",
@@ -166,6 +203,7 @@ _TOLERANCE_OPTIONS = frozenset({"abs_tolerance", "rel_tolerance"})
 _CALL_OPTIONS = frozenset({"calls", "expectation", "arguments_match", "source"})
 CHECK_OPTIONS: dict[str, frozenset[str]] = {
     "rubric": frozenset({"rubric", "panel"}),
+    runner.SCORED_RUBRIC: frozenset({"rubric", "judge_prompt", "expectation", "score_threshold", "negate"}),
     "guidelines": frozenset({"guidelines", "panel"}),
     "conditions": frozenset({"conditions", "panel"}),
     # The grounding judges read each case's inputs.context and take no criteria; any judge can be
@@ -177,19 +215,22 @@ CHECK_OPTIONS: dict[str, frozenset[str]] = {
     "task_completion": frozenset({"panel"}),
     "policy_adherence": frozenset({"guidelines", "panel"}),
     "knowledge_retention": frozenset({"panel"}),
-    "contains": _TEXT_OPTIONS | {"any_of"},
-    "not_contains": _TEXT_OPTIONS,
+    "contains": _TEXT_OPTIONS | {"any_of", "case_mapping"},
+    "not_contains": _TEXT_OPTIONS | {"case_mapping"},
     "contains_any": _TEXT_OPTIONS,
     "contains_all": _TEXT_OPTIONS,
     "equals": _TEXT_OPTIONS,
     "starts_with": _TEXT_OPTIONS,
     "ends_with": _TEXT_OPTIONS,
     "similarity": _TEXT_OPTIONS | {"min_similarity"},
+    "levenshtein": frozenset({"values", "expectation", "max_edits", "negate"}),
     "matches": frozenset({"pattern"}),
     "not_matches": frozenset({"pattern"}),
-    "is_json": frozenset({"required_keys"}),
-    "json_schema": frozenset({"schema"}),
+    "is_json": frozenset({"required_keys", "plain_json"}),
+    "is_xml": frozenset({"required_elements", "fragment", "negate"}),
+    "json_schema": frozenset({"schema", "plain_json", "embedded", "negate"}),
     "length": frozenset({"min_length", "max_length"}),
+    "word_count": frozenset({"min_words", "max_words", "negate"}),
     "latency": frozenset({"max_ms"}),
     "cost": frozenset({"max_usd", "max_tokens"}),
     "number_equals": _TOLERANCE_OPTIONS | {"value", "expectation", "path", "pattern"},
@@ -252,7 +293,30 @@ def suite_from_yaml(text: str, *, name: str, cases: Sequence[Case], suite_id: st
 def _cases(file: Path, input_key: str) -> list[Case]:
     rows = runner.load_cases(file, input_key=input_key)
     if file.suffix.lower() == ".jsonl":
-        _refuse_unread_fields(file)
+        _refuse_unread_fields(file.read_text(encoding="utf-8-sig"))
+    return _model_cases(rows)
+
+
+def validate_definition(suite: runner.Suite, data: str | None = None) -> int | None:
+    """Check an in-memory suite definition and, if supplied, its dataset contents."""
+    suffix = Path(suite.data).suffix.lower()
+    if suffix not in (".jsonl", ".csv"):
+        raise ConfigError("the data file must be .jsonl or .csv")
+    if data is None:
+        _definition(suite)
+        return None
+    rows = runner.parse_cases(data, suffix=suffix, input_key=suite.input_key)
+    if suffix == ".jsonl":
+        _refuse_unread_fields(data)
+    cases = _model_cases(rows)
+    _suite(suite, name="validation", suite_id=None, cases=cases)
+    runner.validate_case_plan(
+        suite, rows, max_judge_tokens=suite.limits.max_judge_tokens, cached=suite.cache is not None
+    )
+    return len(cases)
+
+
+def _model_cases(rows: list[dict[str, Any]]) -> list[Case]:
     cases = []
     for position, row in enumerate(rows, 1):
         try:
@@ -272,9 +336,9 @@ def _cases(file: Path, input_key: str) -> list[Case]:
     return cases
 
 
-def _refuse_unread_fields(file: Path) -> None:
+def _refuse_unread_fields(data: str) -> None:
     """A JSONL case field the runner does not read would be lost on the way into the model."""
-    for number, line in enumerate(file.read_text(encoding="utf-8-sig").splitlines(), 1):
+    for number, line in enumerate(data.removeprefix("\ufeff").split("\n"), 1):
         if not line.strip():
             continue
         record = json.loads(line)  # load_cases has already refused a line that is not an object
@@ -378,6 +442,7 @@ def _check_conversation_judges(file_suite: runner.Suite, cases: list[Case]) -> N
 
 
 def _suite(file_suite: runner.Suite, *, name: str, suite_id: str | None, cases: list[Case]) -> Suite:
+    _check_case_assignments(file_suite, cases)
     _check_conversations(file_suite, cases)
     _check_conversation_judges(file_suite, cases)
     fields = _definition(file_suite)
@@ -395,6 +460,30 @@ def _suite(file_suite: runner.Suite, *, name: str, suite_id: str | None, cases: 
     return draft.model_copy(update={"digest": suite_digest(draft)})
 
 
+def _check_case_assignments(file_suite: runner.Suite, cases: list[Case]) -> None:
+    if not file_suite.check_sets:
+        return
+    assigned = case_check_index(file_suite.check_sets)
+    identifiers = {case.id for case in cases}
+    if missing := sorted(identifiers - assigned.keys()):
+        raise ConfigError(f"case {missing[0]!r} needs a check set")
+    if unknown := sorted(assigned.keys() - identifiers):
+        raise ConfigError(f"check_sets names an unknown case {unknown[0]!r}")
+    if conversation := next((case.id for case in cases if case.turns or case.simulated_user is not None), None):
+        raise ConfigError(f"case {conversation!r} is a conversation, and check_sets apply to single-input cases")
+    needs_call = {
+        check.label
+        for check in file_suite.checks
+        if check.type in runner.CALL_CHECKS or (check.type in runner.TOOL_CHECKS and check.source == "trace")
+    }
+    for case in cases:
+        if case.outputs is not None:
+            if forbidden := sorted(needs_call.intersection(assigned[case.id].checks)):
+                raise ConfigError(f"case {case.id!r} uses a stored output, and {forbidden[0]} needs a target call")
+        elif file_suite.target is None:
+            raise ConfigError(f"case {case.id!r} needs a stored output or a suite target")
+
+
 def _definition(file_suite: runner.Suite) -> dict[str, Any]:
     """Everything a suite file says, as the model's suite fields."""
     if file_suite.judge is not None and not any(check.type in runner.JUDGES for check in file_suite.checks):
@@ -410,6 +499,9 @@ def _definition(file_suite: runner.Suite) -> dict[str, Any]:
             "input_key": file_suite.input_key,
             "target": _target(file_suite.target),
             "scorers": [_scorer(position, check, file_suite.judge) for position, check in enumerate(file_suite.checks)],
+            "case_gate": file_suite.case_gate,
+            "check_sets": file_suite.check_sets,
+            "derived_metrics": file_suite.derived_metrics,
             "settings": _settings(file_suite),
             "repeats": Repeats(
                 attempts=file_suite.repeats,
@@ -436,6 +528,7 @@ def _target(reference: runner.TargetRef | None) -> Target:
         headers=dict(reference.headers),
         body=reference.body,
         response_path=reference.response_path or None,
+        response_mode=reference.response_mode,
     )
 
 
@@ -454,6 +547,9 @@ def _scorer(position: int, check: runner.CheckSpec, judge: runner.JudgeConfig | 
         # The runner refuses a judge check with neither a panel nor a judge.model.
         key = runner.CRITERIA_KEYS.get(check.type)
         criterion = getattr(check, key) if key is not None else None
+        criteria = {} if key is None or criterion is None else {key: criterion}
+        if check.type == runner.SCORED_RUBRIC:
+            criteria = {name: options[name] for name in sorted(options)}
         return ScorerVersion(
             name=check.label,
             kind="llm_judge",
@@ -461,7 +557,7 @@ def _scorer(position: int, check: runner.CheckSpec, judge: runner.JudgeConfig | 
             model=judge.model if judge is not None and check.panel is None else None,
             panel=[PanelMember(model=model) for model in check.panel or []],
             parameters=dict(judge.inference_params) if judge is not None else {},
-            criteria={} if key is None or criterion is None else {key: criterion},
+            criteria=criteria,
             scope=check.scope,
         )
     return ScorerVersion(
@@ -504,7 +600,11 @@ def suite_to_yaml(suite: Suite) -> str:
     """The suite as a suite file that loads back to the same definition. A suite the file cannot
     hold raises ``ConfigError`` naming what it cannot hold. The suite's id, name, version and
     dataset digest are not written: the file's name and its data give them on the next load."""
-    text = yaml.safe_dump(_file(suite), sort_keys=False, allow_unicode=True)
+    authored = _file(suite)
+    text = yaml.safe_dump(authored, sort_keys=False, allow_unicode=True)
+    if any(separator in text for separator in ("\x85", "\u2028", "\u2029")):
+        # YAML can fold literal Unicode line breaks inside scalars. Escapes preserve them.
+        text = yaml.safe_dump(authored, sort_keys=False)
     try:
         written = _definition(runner.parse_suite(text))
     except ConfigError as error:
@@ -583,6 +683,14 @@ def _file(suite: Suite) -> dict[str, Any]:
     if (simulator := _simulator_file(suite.simulator, settings)) is not None:
         file["simulator"] = simulator
     file["checks"] = checks
+    if suite.case_gate is not None:
+        file["case_gate"] = suite.case_gate.model_dump(mode="json", exclude_none=True, exclude_unset=True)
+    if suite.check_sets:
+        file["check_sets"] = [
+            selected.model_dump(mode="json", exclude_none=True, exclude_unset=True) for selected in suite.check_sets
+        ]
+    if suite.derived_metrics is not None:
+        file["derived_metrics"] = suite.derived_metrics.model_dump(mode="json", exclude_none=True)
     if repeats.attempts != 1:
         file["repeats"] = repeats.attempts
     if repeats.combine != "all":
@@ -631,6 +739,8 @@ def _target_file(target: Target | None, settings: RunSettings) -> dict[str, Any]
     written["body"] = target.body
     if target.response_path:
         written["response_path"] = target.response_path
+    if target.response_mode:
+        written["response_mode"] = target.response_mode
     if settings.target_timeout_seconds is not None:
         written["timeout_seconds"] = settings.target_timeout_seconds
     return written
@@ -691,9 +801,12 @@ def _check_file(position: int, scorer: ScorerVersion, combine: str | None) -> di
         if scorer.type not in runner.JUDGES:
             raise ConfigError(f"{where}: a suite file's LLM judges are {', '.join(runner.JUDGES)}")
         key = runner.CRITERIA_KEYS.get(scorer.type)
-        if key is None and scorer.criteria:
+        if scorer.type == runner.SCORED_RUBRIC:
+            if unknown := sorted(set(scorer.criteria) - CHECK_OPTIONS[scorer.type]):
+                raise ConfigError(f"{where}: {', '.join(unknown)} is not an option of {scorer.type} checks")
+        elif key is None and scorer.criteria:
             raise ConfigError(f"{where}: {scorer.type} judges have no criteria")
-        if key is not None and set(scorer.criteria) - {key}:
+        elif key is not None and set(scorer.criteria) - {key}:
             raise ConfigError(f"{where}: {scorer.type} judges keep their criteria under {key} only")
         options = dict(scorer.criteria)
         if any(member.endpoint is not None for member in scorer.panel):

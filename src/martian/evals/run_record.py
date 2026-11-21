@@ -81,6 +81,7 @@ from typing import TYPE_CHECKING, Any
 from martian._version import __version__
 from martian.config import ConfigError
 from martian.evals.calibration import CALIBRATION_KEY, NO_CALIBRATION
+from martian.evals.case_gate import CASE_GATE, gate_definition
 from martian.evals.model import (
     CaseResult,
     CaseStatus,
@@ -96,6 +97,7 @@ from martian.evals.model import (
     Suite,
     Trace,
     TurnResult,
+    digest,
     from_results_record,
 )
 from martian.evals.panel import panel_source
@@ -181,9 +183,14 @@ class RunRecorder:
         self.matrix = matrix
         self.cache = cache
         self._cache_used: dict[str, Any] | None = None
+        self._metric_reports: dict[str, list[dict[str, Any]]] = {}
         self.run: Run | None = None
         self._ended = False
         self._scorers = {scorer.name: scorer for scorer in suite.scorers}
+        if definition := gate_definition(suite.case_gate, suite.check_sets):
+            self._scorers[CASE_GATE] = ScorerVersion(
+                name=CASE_GATE, kind="check", type=CASE_GATE, version=digest(definition)
+            )
         self._statuses: dict[str, CaseStatus] = {}
 
     # --- the run -----------------------------------------------------------------------------
@@ -249,6 +256,12 @@ class RunRecorder:
         }
         if repeats is not None:
             provenance["repeats"] = repeats
+        if suite.case_gate is not None:
+            provenance[CASE_GATE] = suite.case_gate.model_dump(mode="json", exclude_none=True)
+        if suite.check_sets:
+            provenance["check_sets"] = [
+                selected.model_dump(mode="json", exclude_none=True) for selected in suite.check_sets
+            ]
         if conversations:
             provenance["conversations"] = conversations
         if self._limits != RunLimits():
@@ -321,6 +334,10 @@ class RunRecorder:
         """Keep the run's use of the cache of model calls, with its counts, for ``provenance.cache``
         when the run ends, whether it finished, stopped at a limit or was cancelled."""
         self._cache_used = report
+
+    def measured_metrics(self, reports: dict[str, list[dict[str, Any]]]) -> None:
+        """Keep the aggregate metric reports of the recorded cases for the workbench."""
+        self._metric_reports = reports
 
     def stop(self, stopped: dict[str, Any]) -> Run:
         """Record that the run reached one of its limits before its last case (``RunLimits.stop``):
@@ -404,6 +421,7 @@ class RunRecorder:
                 provenance["stopped"] = stopped
             if self._cache_used is not None:
                 provenance["cache"] = {"on": True, **self._cache_used}
+            provenance.update(self._metric_reports)
             if provenance != current.provenance:
                 changes["provenance"] = provenance
             finished = current.model_copy(update=changes)
@@ -612,6 +630,14 @@ class RunRecorder:
         """One check's verdict on one attempt, as a score its trace carries."""
         scorer = self._scorers.get(label)
         judge = scorer is not None and scorer.kind == "llm_judge"
+        value: bool | float | None = verdict.value if verdict.value is not None else verdict.passed
+        if (
+            verdict.value is None
+            and scorer is not None
+            and scorer.type == CASE_GATE
+            and (score := verdict.metadata.get("score")) is not None
+        ):
+            value = float(score)
         return Score(
             run_id=result.run_id,
             case_id=result.case_id,
@@ -619,7 +645,7 @@ class RunRecorder:
             scorer_version=scorer.version if scorer else "",
             source="llm_judge" if judge else "code",
             source_id=_judge_source(scorer) if scorer is not None and judge else "",
-            value=verdict.passed,
+            value=value,
             passed=verdict.passed,
             rationale=verdict.rationale,
             error=verdict.error,

@@ -463,6 +463,10 @@ class ProxiedTarget:
         return str(getattr(self._target, "name", ""))
 
     @property
+    def findings_key(self) -> str:
+        return str(getattr(self._target, "findings_key", ""))
+
+    @property
     def proxy(self) -> ToolProxy:
         """The proxy the target's tools go through, where a ``tool_result`` route stages its text."""
         return self._proxy

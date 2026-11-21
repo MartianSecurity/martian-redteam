@@ -86,11 +86,17 @@ CHECKS: dict[str, dict[str, Any]] = {
     "starts_with": {"values": ["Your refund"]},
     "ends_with": {"values": ["support@shop.example."]},
     "similarity": {"expectation": "reference", "min_similarity": 0.6},
+    "levenshtein": {"expectation": "reference", "max_edits": 1},
     "matches": {"pattern": r"ORD-\d{6}"},
     "not_matches": {"pattern": "sk-[A-Za-z0-9]{8,}"},
     "is_json": {"required_keys": ["answer"]},
-    "json_schema": {"schema": {"type": "object", "required": ["answer"], "properties": {"answer": {"type": "string"}}}},
+    "is_xml": {"required_elements": ["catalog.book.1.title"], "fragment": True, "negate": True},
+    "json_schema": {
+        "embedded": "promptfoo",
+        "schema": {"type": "object", "required": ["answer"], "properties": {"answer": {"type": "string"}}},
+    },
     "length": {"max_length": 80},
+    "word_count": {"min_words": 2, "max_words": 10},
     "number_equals": {"value": "1234.56", "pattern": r"\$([\d,.]+)"},
     "sums_to": {"parts": ["lines.*.amount"], "total": "subtotal"},
     "reconciles": {"add": ["opening"], "subtract": ["spent"], "total": "closing"},
@@ -376,8 +382,23 @@ def test_a_suite_keeps_checks_with_their_options_and_a_job_applies_the_saved_ver
             422,
             json={"request_id": request_id(), "suite_version_id": saved["id"], "scorers": [], "checks": checks[:1]},
         )
+        revised = served.call(
+            "POST",
+            "/v1/evals/suites",
+            201,
+            json={
+                **body,
+                "request_id": request_id(),
+                "suite_id": saved["suite_id"],
+                "expected_version": 1,
+                "name": "Revised checks",
+            },
+        )
+        assert revised["version"] == 2
         found = scored(served, run, **pinned)
-        [job] = served.call("GET", f"/v1/evals/{run['id']}/workbench", 200)["jobs"]
+        workbench = served.call("GET", f"/v1/evals/{run['id']}/workbench", 200)
+        [job] = workbench["jobs"]
+    assert job == workbench["selected_job"] and job["config"]["suite_name"] == saved["name"]
     assert job["config"]["suite_version"] == 1 and job["state"] == "completed"
     assert found[("text", "names_refund")][0] is True and found[("json", "names_refund")][0] is False
     assert found[("text", "length")][0] is False and found[("json", "length")][0] is False

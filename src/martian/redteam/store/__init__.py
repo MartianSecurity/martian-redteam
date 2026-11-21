@@ -82,6 +82,17 @@ def as_eval_run(run: RedteamRun) -> Run:
     )
 
 
+def redteam_header(record: Run) -> dict[str, Any]:
+    """Restore current state and finish time on the recorded Red Team header."""
+    return {
+        **record.provenance.get("redteam", {}),
+        "id": record.id,
+        "project_id": record.project_id,
+        "state": record.state,
+        "finished_at": record.finished_at,
+    }
+
+
 def as_case_result(run_id: str, position: int, attempt: Attempt) -> CaseResult:
     output = attempt.model_dump(mode="json", exclude=set(_ATTEMPT_IN_CASE))
     error = attempt.error or (UNDETERMINED if attempt.outcome == "undetermined" else "")
@@ -279,11 +290,9 @@ class RedteamStore:
             offset += len(page.items)
         scores = await self.records.list_scores(principal, project_id, run_id)
         extra = await self.records.get_redteam_records(principal, project_id, run_id)
-        header = dict(record.provenance.get("redteam", {}))
+        header = redteam_header(record)
         header.update(
             {
-                "state": record.state,
-                "finished_at": record.finished_at,
                 "probes": [Probe.model_validate(item) for item in extra.probes],
                 "attempts": [_attempt(result, scores) for result in results],
                 "evidence": [Evidence.model_validate(item) for item in extra.evidence],

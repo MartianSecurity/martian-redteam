@@ -104,32 +104,63 @@ martian ui                                        # the run is in the Red Team p
 The importer reads the JSON output file promptfoo writes (`promptfoo redteam run -o` or `promptfoo eval
 -o`), whose `results` is an `EvaluateSummary` of version 3, the same file shape `martian evals import
 promptfoo` reads ([promptfoo results](evals-core.md#promptfoo-results-and-configs)). Every row must be
-a red team row, with `testCase.metadata.pluginId` or a `promptfoo:redteam:*` assertion; a file of
+a red team row, with a `pluginId` in test or result metadata or a `promptfoo:redteam:*` assertion. A file of
 eval results is refused with exit code `2` and points to `martian evals import promptfoo`. Every file
 is read before anything is written.
 
 Each provider in the file is one [`RedteamRun`](redteam-model.md) in the local store (`--data-dir`,
-else `MARTIAN_EVALS_HOME`, else `~/.martian/evals`), with id `promptfoo-<evalId>-<provider>`.
-Importing the file again replaces that run. The run is kept as `martian redteam run` keeps one: the
-attacks, replies and grader reasons as digests unless `MARTIAN_REPORT_INCLUDE_CONTENT=1`, and
-credentials redacted ([security and data](security-and-data.md)).
+else `MARTIAN_EVALS_HOME`, else `~/.martian/evals`). Providers with the same display label get
+distinct run names. When they also share a provider ID, the importer checks the archived prompt
+columns against the declared providers and inline prompts. The run provenance includes the
+verified provider position. The run ID starts with
+`promptfoo-<evalId>-<provider>` and adds a digest when normalized provider names collide or an
+earlier archive uses that ID. Re-exporting a scan reuses its stored run and reviews when only
+JSON formatting, the sharing URL or exporter metadata such as the export time changes.
+The first file's path and SHA-256 stay in the saved run. Changes to recorded scan data and
+corrected imports of older records retain their own snapshots.
+The initial import stores prompt and reply content under the usual report privacy settings.
+Set `MARTIAN_REPORT_INCLUDE_CONTENT=1` before importing to keep content with credentials redacted.
+[Security and data](security-and-data.md)
 
 | promptfoo | Red team model |
 | --- | --- |
 | A row's plugin and `strategyId` (`basic` when absent) | A probe. A mapped plugin and strategy take the catalogue's vulnerability, type and attack method (the tables above); others keep promptfoo's id as `promptfoo:<id>`. `Probe.metadata["promptfoo"]` keeps both ids |
-| `testCase.metadata.goal`, `pluginConfig.policy` | `Probe.goal`, and a policy probe's `criteria` |
+| Recorded `goal`, `policyId`, `policyName` and policy text | `Probe.goal` and a policy probe's identity, display name and criteria. Findings and Remediation Reports keep distinct policies visible separately |
 | A row | An `Attempt`. Its input is the attack (`vars[injectVar]`), its output the target's reply, and its turns `response.metadata.redteamHistory` when promptfoo kept one |
 | `success` true | `resisted` |
 | `success` false | `hit` at level 1, suspected. The grader's verdict is the attempt's one check, `promptfoo-grader` of kind `judge`, with promptfoo's reason |
-| `failureReason` 2 | `error`: a `target` error when `response.error` is set, else a `judge` error |
-| `testCase.metadata.severity` | The finding's severity |
+| `failureReason` 2 or a provider error in `response.error` | `error`: a `target` error when the response records one, else a `judge` error |
+| Severity in the test or result metadata | The highest recorded severity among the rows that produced the finding |
+| Result timestamp and `stats.durationMs` | Recorded start and, when both are available, calculated finish. Reports for older archives can have an unknown finish time |
 | `evalId`, the file's path and SHA-256, the timestamp, the provider, `metadata.promptfooVersion` | `RedteamRun.provenance["promptfoo"]` |
 | `redteam.purpose`, else a row's `metadata.purpose` | `RedteamRun.purpose` |
 
-Every imported hit is suspected, never confirmed: promptfoo's graders are models that read the reply,
-the checks were not stated before the attack, and nothing was re-run. The run's `limitations` say so,
-and its catalogue version is `promptfoo`. Re-run the converted config to get findings this engine
-decides.
+Every imported hit is a suspected finding based on the source verdict. The run's limitations
+record its origin and its catalogue version is `promptfoo`. Import is a local read of the
+archive and creates reports in the local store.
+
+### Group archived scans for the same target
+
+When importing a series of scans from Promptfoo or Marsfoo, use the same `--target-key` for
+exports of the same target. Each scan keeps its own remediation report. Findings groups recurring
+observations by that key and retains the target's triage history across scans.
+
+```bash
+martian redteam import promptfoo baseline.json follow-up.json \
+  --provider 'Production help desk' --target-key help-desk-prod
+```
+
+Choose a key at the initial import. Use 1–100 ASCII letters, digits, dots, underscores or hyphens,
+starting with a letter or digit. The key is case-sensitive. An archive with several providers
+requires `--provider` to select one provider by its exact displayed name, including any
+`(provider 1)` suffix. Each selected scan needs a recorded start time. Use separate keys for
+different targets, including production and staging. An existing run keeps its original
+assignment on reimport. Use a separate data folder to assign a key to previously unlinked
+archives while retaining the original runs and reviews.
+
+The Remediation page suggests later linked scans when both have recorded finish times. It can
+show a repeated source finding. For a finding absent from a later archive, coverage verification
+is inconclusive when the archive lacks Martian's attempt configuration fingerprints.
 
 ## garak probes
 

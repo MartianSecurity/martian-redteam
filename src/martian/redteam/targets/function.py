@@ -22,6 +22,7 @@ import asyncio
 import inspect
 import time
 from collections.abc import Iterable
+from os.path import abspath
 from pathlib import Path
 
 from martian.evals.conversations import CONVERSATION_INPUTS, HISTORY, SESSION_ID
@@ -29,6 +30,7 @@ from martian.evals.isolation import TargetProcess, TargetRaised
 from martian.evals.runner import TargetCallError, TargetRef
 from martian.redteam.targets import TargetReply
 from martian.redteam.targets.conversations import Conversations
+from martian.redteam.targets.identity import identity_digest
 from martian.redteam.targets.reply import reply_from
 
 MESSAGE = "message"
@@ -46,6 +48,8 @@ class FunctionTarget:
         file = Path(reference.file)
         self._file = file if file.is_absolute() else Path(base) / file
         self._function = reference.function
+        self.name = f"{self._file.name}:{self._function}"
+        self.findings_key = identity_digest(self.kind, abspath(self._file), self._function)
         self._timeout = reference.timeout_seconds
         self._private = list(private)
         self._process: TargetProcess | None = None

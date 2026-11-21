@@ -4,8 +4,8 @@ promptfoo is not installed and not called. :func:`convert_config` reads a ``prom
 with a ``redteam`` section and writes the run file where its features map, listing everything that
 does not (:data:`PLUGINS`, :data:`STRATEGIES`). :func:`import_results` reads the JSON file
 ``promptfoo redteam run -o results.json`` (or ``promptfoo eval -o``) writes and keeps each provider's
-rows as one :class:`~martian.redteam.model.RedteamRun` in the local store. promptfoo's graders are
-models reading the reply, so every imported hit is suspected (evidence level 1).
+rows as one :class:`~martian.redteam.model.RedteamRun` in the local store. The SDK records imported
+hits as suspected evidence (level 1), based on the verdicts in the archive.
 
 ``docs/redteam-interop.md`` lists every mapping.
 """
@@ -14,16 +14,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
+from collections import Counter
+from contextlib import ExitStack
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
 from pydantic import ValidationError
 
+from martian._privacy import safe_text
 from martian.redteam.model import (
     Attempt,
     AttemptOutcome,
@@ -35,9 +39,12 @@ from martian.redteam.model import (
     Turn,
 )
 from martian.redteam.model.maps import counts_of, findings_of, objective_of, probe_id
+from martian.redteam.targets.identity import identity_digest
 
 if TYPE_CHECKING:
+    from martian.evals.model import Run
     from martian.evals.promptfoo_import import PromptfooResult, PromptfooResults
+    from martian.redteam.store import RedteamStore
 
 
 class PromptfooConversionError(Exception):
@@ -628,16 +635,21 @@ GRADER = "promptfoo-grader"
 """The check id of promptfoo's grader on an imported attempt: a model's verdict, level 1."""
 
 LIMITATION = (
-    "Imported from promptfoo. Each verdict is promptfoo's grader, a model that read the reply, so every "
-    "finding is suspected (level 1). The checks were not stated in advance and nothing was re-run."
+    "Imported from promptfoo. Findings use the archived grader verdicts as suspected evidence (level 1). "
+    "The archive is a record of the source evaluation."
 )
 
 
+def _row_metadata(row: PromptfooResult) -> dict[str, Any]:
+    source = row.test_case.get("metadata")
+    return {**(row.metadata or {}), **(source if isinstance(source, dict) else {})}
+
+
 def plugin_of(row: PromptfooResult) -> str | None:
-    """The row's promptfoo plugin: ``testCase.metadata.pluginId``, else its red team assertion's type."""
-    metadata = row.test_case.get("metadata") or {}
-    if isinstance(metadata.get("pluginId"), str):
-        return str(metadata["pluginId"])
+    """The recorded plugin ID, or the red team assertion that names it."""
+    plugin = _row_metadata(row).get("pluginId")
+    if isinstance(plugin, str) and plugin:
+        return plugin
     for assertion in row.test_case.get("assert") or []:
         kind = assertion.get("type") if isinstance(assertion, dict) else None
         if isinstance(kind, str) and kind.startswith("promptfoo:redteam:"):
@@ -699,10 +711,11 @@ def _attempt(row: PromptfooResult, *, identifier: str, probe: str, number: int, 
     error, error_kind = "", None
     grading = row.grading_result
     results: list[CheckResult] = []
-    if row.failure_reason == FAILED_WITH_ERROR:
+    provider_error = _nonempty(response.get("error"))
+    if row.failure_reason == FAILED_WITH_ERROR or provider_error:
         outcome = "error"
-        error = (row.error or response.get("error") or "promptfoo recorded an error")[:2000]
-        error_kind = "target" if response.get("error") else "judge"
+        error = (row.error or provider_error or "promptfoo recorded an error")[:2000]
+        error_kind = "target" if provider_error else "judge"
     else:
         outcome = "resisted" if row.success else "hit"
         results.append(
@@ -730,7 +743,7 @@ def _attempt(row: PromptfooResult, *, identifier: str, probe: str, number: int, 
     )
 
 
-def _target_ref(provider: Any, purpose: str) -> TargetRef:
+def _target_ref(provider: Any, purpose: str, name: str) -> TargetRef:
     identifier = provider.id
     if identifier.startswith(("http://", "https://")) or identifier in ("http", "https"):
         kind = "http"
@@ -738,15 +751,14 @@ def _target_ref(provider: Any, purpose: str) -> TargetRef:
         kind = "function"
     else:
         kind = "callback"
-    return TargetRef(kind=kind, name=provider.label or identifier, purpose=purpose)  # type: ignore[arg-type]
+    return TargetRef(kind=kind, name=name, purpose=purpose)  # type: ignore[arg-type]
 
 
-def results_runs(found: PromptfooResults) -> list[RedteamRun]:
+def results_runs(
+    found: PromptfooResults, *, provider_name: str | None = None, target_key: str | None = None
+) -> list[RedteamRun]:
     """One red team run per provider of a promptfoo results file. Raises
     :class:`PromptfooConversionError` for a file whose rows are not red team rows."""
-    from martian.evals.promptfoo_import import provider_name
-    from martian.redteam.store import finished
-
     file = found.file
     config = file.config or {}
     redteam = config.get("redteam") if isinstance(config.get("redteam"), dict) else {}
@@ -757,23 +769,45 @@ def results_runs(found: PromptfooResults) -> list[RedteamRun]:
             f"{found.path.name}: test {plain[0]} has no red team plugin; for eval results use martian evals "
             "import promptfoo"
         )
-    providers: dict[str, list[PromptfooResult]] = {}
-    for row in file.results.results:
-        providers.setdefault(provider_name(row.provider), []).append(row)
-    started = _when(file.results.timestamp) or datetime.now(UTC)
+    recorded_start = _when(file.results.timestamp) or _when((file.metadata or {}).get("evaluationCreatedAt"))
+    providers = [group for group in found.providers if provider_name is None or group.name == provider_name]
+    if not providers:
+        raise PromptfooConversionError(f"{found.path.name}: no provider named {provider_name!r} in the archive.")
+    if target_key is not None:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", target_key):
+            raise PromptfooConversionError(
+                "A target key must be 1–100 ASCII letters, digits, dots, underscores or hyphens, "
+                "starting with a letter or digit."
+            )
+        if len(providers) != 1:
+            raise PromptfooConversionError(f"{found.path.name}: use --provider to link exactly one provider.")
+        if recorded_start is None:
+            raise PromptfooConversionError(f"{found.path.name}: a linked scan needs a recorded start time.")
+    started = recorded_start or datetime.now(UTC)
+    ended = _finished_at(recorded_start, file.results.stats.get("durationMs"))
+    archive_sha256 = found.archive_sha256 or found.sha256
+    eval_id = file.eval_id or archive_sha256[:12]
+    ids = {group.name: _run_id(eval_id, group.name) for group in found.providers}
+    occurrences = Counter(ids.values())
     runs: list[RedteamRun] = []
-    for name, rows in providers.items():
+    for group in providers:
+        name, rows = group.name, group.rows
         probes: dict[str, Probe] = {}
         attempts: list[Attempt] = []
         numbers: dict[str, int] = {}
         severity: dict[str, str] = {}
         purpose = (redteam or {}).get("purpose") or ""
         for position, row in enumerate(rows, start=1):
-            metadata = row.test_case.get("metadata") or {}
+            metadata = _row_metadata(row)
             plugin = plugin_of(row) or ""
             strategy = str(metadata.get("strategyId") or "basic")
             purpose = purpose or str(metadata.get("purpose") or "")
             vulnerability, kind, method = _probe_names(plugin, strategy)
+            source = {"plugin": plugin, "strategy": strategy}
+            criteria = None
+            if plugin == "policy":
+                kind, criteria, policy_source = _policy(metadata, row.test_idx)
+                source.update(policy_source)
             key = probe_id(vulnerability, kind, method)
             numbers[key] = numbers.get(key, 0) + 1
             if key not in probes:
@@ -784,15 +818,16 @@ def results_runs(found: PromptfooResults) -> list[RedteamRun]:
                     attack_method=method,
                     objective_class=objective_of(vulnerability),
                     goal=str(metadata.get("goal") or ""),
-                    criteria=_policy(metadata) if plugin == "policy" else None,
-                    metadata={"promptfoo": {"plugin": plugin, "strategy": strategy}},
+                    criteria=criteria,
+                    metadata={"promptfoo": source},
                 )
+            identifier = f"attempt-{position:04d}"
             if (level := SEVERITIES.get(str(metadata.get("severity", "")).lower())) is not None:
-                severity[key] = max(severity.get(key, level), level, key=_SEVERITY_RANK.index)
+                severity[identifier] = level
             attempts.append(
                 _attempt(
                     row,
-                    identifier=f"attempt-{position:04d}",
+                    identifier=identifier,
                     probe=key,
                     number=numbers[key],
                     inject=inject,
@@ -800,19 +835,31 @@ def results_runs(found: PromptfooResults) -> list[RedteamRun]:
             )
         probe_list = [probe.model_copy(update={"planned_attempts": numbers[probe.id]}) for probe in probes.values()]
         findings = [
-            finding.model_copy(update={"severity": severity.get(finding.probe_id)})
+            finding.model_copy(
+                update={
+                    "severity": max(
+                        (severity[item] for item in finding.attempt_ids if item in severity),
+                        key=_SEVERITY_RANK.index,
+                        default=None,
+                    )
+                }
+            )
             for finding in findings_of(probe_list, attempts, [])
         ]
-        provider = rows[0].provider
-        slug = re.sub(r"[^A-Za-z0-9._-]+", "-", f"{file.eval_id or found.sha256[:12]}-{name}").strip("-")
+        provider = group.provider
+        provider_source = group.provenance()
+        key = _archive_key("v2", archive_sha256, provider_source)
+        run_id = _versioned_id(ids[name], key) if occurrences[ids[name]] > 1 else ids[name]
         run = RedteamRun(
-            id=f"promptfoo-{slug}"[:200],
+            id=run_id,
             source="local",
             state="completed",
             catalog_version="promptfoo",
             purpose=purpose or None,
-            target=_target_ref(provider, purpose),
+            target=_target_ref(provider, purpose, name),
             started_at=started,
+            finished_at=ended,
+            duration_seconds=(ended - started).total_seconds() if ended is not None else 0,
             probes=probe_list,
             attempts=attempts,
             findings=findings,
@@ -822,21 +869,56 @@ def results_runs(found: PromptfooResults) -> list[RedteamRun]:
                 "promptfoo": {
                     "results": str(found.path),
                     "results_sha256": found.sha256,
+                    "archive_key": key,
                     "eval_id": file.eval_id,
                     "timestamp": file.results.timestamp,
-                    "provider": {"id": provider.id, "label": provider.label},
+                    "provider": provider_source,
                     "version": (file.metadata or {}).get("promptfooVersion"),
                 }
             },
         )
-        runs.append(finished(run))
+        runs.append(_linked_target(run, target_key) if target_key is not None else run)
     return runs
 
 
-def _policy(metadata: dict[str, Any]) -> str | None:
-    policy = (metadata.get("pluginConfig") or {}).get("policy")
-    text = policy.get("text") if isinstance(policy, dict) else policy
-    return text if isinstance(text, str) and text.strip() else None
+def _linked_target(run: RedteamRun, target_key: str) -> RedteamRun:
+    assert run.target is not None
+    return run.model_copy(
+        update={
+            "target": run.target.model_copy(update={"name": target_key}),
+            "provenance": {
+                **run.provenance,
+                "findings_target": identity_digest("promptfoo-target-v1", target_key),
+                "promptfoo": {**run.provenance["promptfoo"], "target_key": target_key},
+            },
+        }
+    )
+
+
+def _nonempty(value: Any) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _policy(metadata: dict[str, Any], test_idx: int) -> tuple[str, str | None, dict[str, str]]:
+    config = metadata.get("pluginConfig")
+    policy = config.get("policy") if isinstance(config, dict) else None
+    details = policy if isinstance(policy, dict) else {}
+    policy_id = _nonempty(metadata.get("policyId")) or _nonempty(details.get("id"))
+    text = _nonempty(metadata.get("policy")) or _nonempty(details.get("text", policy))
+    fallback = f"Promptfoo policy · test {test_idx + 1}"
+    if policy_id:
+        key = identity_digest("policy-id", policy_id)
+        fallback = "Promptfoo policy · " + policy_id
+    elif text:
+        key = identity_digest("policy-text", text)
+        fallback = "Promptfoo policy"
+    else:
+        key = identity_digest("policy-test", str(test_idx))
+    name = _nonempty(metadata.get("policyName")) or _nonempty(details.get("name")) or fallback
+    source = {"policy_name": safe_text(name)[:200]}
+    if policy_id:
+        source["policy_id"] = safe_text(policy_id)
+    return "policy-" + key[:16], text, source
 
 
 def _when(value: Any) -> datetime | None:
@@ -849,28 +931,134 @@ def _when(value: Any) -> datetime | None:
     return found if found.tzinfo else found.replace(tzinfo=UTC)
 
 
-def import_results(paths: list[Path], home: Path | None = None) -> list[RedteamRun]:
+def _finished_at(start: datetime | None, duration: Any) -> datetime | None:
+    if start is not None and type(duration) in (int, float) and duration >= 0:
+        try:
+            if math.isfinite(duration):
+                return start + timedelta(milliseconds=duration)
+        except OverflowError:
+            return None
+    return None
+
+
+def _run_id(eval_id: str, provider_name: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", f"{eval_id}-{provider_name}").strip("-")
+    return ("promptfoo-" + slug)[:200]
+
+
+def _versioned_id(base: str, archive_key: str) -> str:
+    suffix = "-" + archive_key[:16]
+    return base if base.endswith(suffix) else base[: 200 - len(suffix)] + suffix
+
+
+def _archive_key(revision: str, sha256: str, provider: dict[str, Any]) -> str:
+    parts = [f"promptfoo-archive-{revision}", sha256, provider["id"], provider["label"] or ""]
+    if "position" in provider:
+        parts.append(str(provider["position"]))
+    return identity_digest(*parts)
+
+
+def _archive_candidates(run: RedteamRun) -> tuple[tuple[str, ...], tuple[str, str]]:
+    """Keep identical files addressable under the earlier raw-file archive key, too."""
+    source = run.provenance["promptfoo"]
+    key = source["archive_key"]
+    previous_sha256 = source["results_sha256"]
+    provider = source["provider"]
+    previous = _archive_key("v1", previous_sha256, provider)
+    name = provider.get("display_name") or provider["label"] or provider["id"]
+    previous_base = _run_id(source["eval_id"] or previous_sha256[:12], name)
+    return (run.id, _versioned_id(run.id, key), previous_base, _versioned_id(previous_base, previous)), (key, previous)
+
+
+def _stored_archive(record: Run | None) -> dict[str, Any]:
+    header = record.provenance.get("redteam") if record is not None and record.kind == "redteam" else None
+    provenance = header.get("provenance") if isinstance(header, dict) else None
+    source = provenance.get("promptfoo") if isinstance(provenance, dict) else None
+    return source if isinstance(source, dict) else {}
+
+
+async def _save_archives(store: RedteamStore, runs: list[RedteamRun]) -> list[RedteamRun]:
+    from martian.evals.server.principal import SINGLE_USER
+    from martian.evals.server.projection import DEFAULT_PROJECT
+    from martian.redteam.engine.report import for_report
+
+    planned: dict[str, RedteamRun] = {}
+    selected: list[RedteamRun] = []
+    archives = [_archive_candidates(run) for run in runs]
+    alternatives = sorted({run_id for candidates, _ in archives for run_id in candidates})
+    with ExitStack() as sessions:
+        for run_id in alternatives:
+            sessions.enter_context(store.run_session(DEFAULT_PROJECT, run_id))
+        existing = {
+            run_id: await store.records.get_run(SINGLE_USER, DEFAULT_PROJECT, run_id) for run_id in alternatives
+        }
+        for run, (candidates, keys) in zip(runs, archives, strict=True):
+            source = run.provenance["promptfoo"]
+            for run_id in candidates:
+                archived = _stored_archive(existing[run_id])
+                if run_id in planned:
+                    archived = planned[run_id].provenance["promptfoo"]
+                if archived.get("archive_key") not in keys:
+                    continue
+                saved_key = archived.get("target_key")
+                requested_key = source.get("target_key")
+                if requested_key is not None and requested_key != saved_key:
+                    raise PromptfooConversionError(
+                        f"Run {run_id} already has a different archive target assignment. "
+                        "Use its original target key, or import in a separate data folder."
+                    )
+                if requested_key is None and isinstance(saved_key, str):
+                    run = _linked_target(run, saved_key)
+                break
+            else:
+                run_id = next((item for item in candidates[:2] if existing[item] is None and item not in planned), "")
+                if not run_id:
+                    raise PromptfooConversionError(f"Run {run.id} belongs to another record.")
+            run = run.model_copy(update={"id": run_id})
+            planned.setdefault(run.id, run)
+            selected.append(run)
+        for run in planned.values():
+            if existing[run.id] is not None:
+                # The probes are written after the run header and all the attempts.
+                records = await store.records.get_redteam_records(SINGLE_USER, run.project_id, run.id)
+                if records.probes:
+                    continue
+            await store.save(for_report(run))
+    return selected
+
+
+def import_results(
+    paths: list[Path],
+    home: Path | None = None,
+    *,
+    provider_name: str | None = None,
+    target_key: str | None = None,
+) -> list[RedteamRun]:
     """Read every promptfoo results file first, so one that cannot be read stops the import before
     anything is written, then keep each provider's rows as a red team run in the local store
     (``home``, else ``MARTIAN_EVALS_HOME``, else ``~/.martian/evals``), as a run of the engine is kept:
-    content as digests unless ``MARTIAN_REPORT_INCLUDE_CONTENT=1``, credentials redacted. Importing a
-    file again replaces its runs. Returns the runs as read, with their content."""
+    content as digests unless ``MARTIAN_REPORT_INCLUDE_CONTENT=1``, credentials redacted. Each
+    archive revision keeps its own reports. A target key groups one explicitly selected provider
+    per file into the same Findings history. Returns the runs as read, with their content."""
     from martian.evals.promptfoo_import import PromptfooResultsError, read_promptfoo_results
-    from martian.redteam.engine.report import for_report
+    from martian.evals.store import StoreError
+    from martian.redteam.engine.budget import ResumeError
     from martian.redteam.store import RedteamStore
 
     try:
         found = [read_promptfoo_results(path) for path in paths]
     except PromptfooResultsError as error:
         raise PromptfooConversionError(str(error)) from None
-    runs = [run for results in found for run in results_runs(results)]
+    runs = [
+        run for results in found for run in results_runs(results, provider_name=provider_name, target_key=target_key)
+    ]
     store = RedteamStore.local(home)
     try:
-        for run in runs:
-            asyncio.run(store.save(for_report(run)))
+        return asyncio.run(_save_archives(store, runs))
+    except (StoreError, ResumeError) as error:
+        raise PromptfooConversionError(str(error)) from None
     finally:
         store.close()
-    return runs
 
 
 __all__ = [

@@ -205,6 +205,7 @@ LEFT_OUT_TABLES = {
             "martian_redteam_findings",
         )
     },
+    "martian_redteam_triage": "the review history of Red Team findings, whose source runs are outside this format",
 }
 """Each table of the record store that an export leaves out, and why."""
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -35,6 +36,7 @@ from sqlalchemy import (
     func,
     insert,
     literal,
+    or_,
     select,
     text,
     update,
@@ -95,6 +97,7 @@ from martian.evals.records.tables import (
     redteam_evidence,
     redteam_findings,
     redteam_probes,
+    redteam_triage,
     redteam_verifications,
     reviews,
     runs,
@@ -154,6 +157,27 @@ def _json(model: Any) -> Any:
 
 
 _ACTIVE = ("queued", "running")
+
+
+@dataclass(frozen=True)
+class RedteamObservationRecord:
+    run_id: str
+    started_at: datetime
+    target: dict[str, Any] | None
+    target_id: str | None
+    target_key: str | None
+    finding: dict[str, Any]
+    method: str | None
+    policy_name: str | None
+    linked_archive: bool
+
+
+@dataclass(frozen=True)
+class RedteamTriageEntry:
+    finding_id: str
+    id: str
+    created_at: datetime
+    record: dict[str, Any]
 
 
 def _count(connection: Connection, rows: Select[Any], up_to: int | None) -> int:
@@ -533,6 +557,171 @@ class SqlRecordStore:
                     ).scalars()
                 )
             return RedteamRecords(**found)
+
+        return await self._run(principal, work)
+
+    async def list_redteam_target_runs(
+        self, principal: Principal, project_id: str, *, target_id: str, adapter_identity: str
+    ) -> list[Run]:
+        """Read candidate run records for a saved target ID or adapter identity."""
+        run = runs.c
+        provenance = run.record[("provenance", "redteam", "provenance")]
+        matches = []
+        if target_id:
+            matches.append(provenance[("launch", "target_id")].as_string() == target_id)
+        if adapter_identity:
+            matches.append(provenance["findings_target"].as_string() == adapter_identity)
+        if not matches:
+            return []
+
+        def work(connection: Connection, space: str) -> list[Run]:
+            rows = connection.execute(
+                select(run.record).where(
+                    run.space == space,
+                    run.project_id == project_id,
+                    run.kind == "redteam",
+                    run.state.not_in(_ACTIVE),
+                    or_(*matches),
+                )
+            ).scalars()
+            return [Run.model_validate(row) for row in rows]
+
+        return await self._run(principal, work)
+
+    async def read_redteam_inventory(
+        self, principal: Principal, project_id: str
+    ) -> tuple[int, list[RedteamObservationRecord], list[tuple[str, dict[str, Any]]]]:
+        """Finished scans, findings joined to their probes, and project triage in storage order."""
+
+        def work(
+            connection: Connection, space: str
+        ) -> tuple[int, list[RedteamObservationRecord], list[tuple[str, dict[str, Any]]]]:
+            run = runs.c
+            header = run.record[("provenance", "redteam")]
+            scope = (
+                run.space == space,
+                run.project_id == project_id,
+                run.kind == "redteam",
+                run.state.not_in(_ACTIVE),
+                # A re-judge changes the interpretation of recorded evidence without another observation.
+                header[("provenance", "rejudged_from")].as_string().is_(None),
+            )
+            scans = connection.execute(select(func.count()).select_from(runs).where(*scope)).scalar_one()
+            findings = redteam_findings.c
+            probes = redteam_probes.c
+            known = (
+                select(
+                    run.id,
+                    run.created_at,
+                    header["target"],
+                    header[("provenance", "launch", "target_id")].as_string(),
+                    header[("provenance", "findings_target")].as_string(),
+                    findings.record,
+                    probes.record["attack_method"].as_string(),
+                    probes.record[("metadata", "promptfoo", "policy_name")].as_string(),
+                    header[("provenance", "promptfoo", "target_key")].as_string().is_not(None),
+                )
+                .join_from(
+                    runs,
+                    redteam_findings,
+                    (run.space == findings.space)
+                    & (run.project_id == findings.project_id)
+                    & (run.id == findings.run_id),
+                )
+                .outerjoin(
+                    redteam_probes,
+                    (findings.space == probes.space)
+                    & (findings.project_id == probes.project_id)
+                    & (findings.run_id == probes.run_id)
+                    & (findings.record["probe_id"].as_string() == probes.id),
+                )
+                .where(*scope)
+                .order_by(run.created_at.desc(), run.id, findings.position)
+            )
+            observations = [RedteamObservationRecord(*row) for row in connection.execute(known)]
+            triage = redteam_triage.c
+            entries = [
+                (finding_id, note)
+                for finding_id, note in connection.execute(
+                    select(triage.finding_id, triage.record)
+                    .where(triage.space == space, triage.project_id == project_id)
+                    .order_by(triage.created_at, triage.id)
+                )
+            ]
+            return scans, observations, entries
+
+        return await self._run(principal, work)
+
+    @staticmethod
+    def _redteam_triage_entry(
+        connection: Connection, space: str, project_id: str, entry_id: str
+    ) -> tuple[str, dict[str, Any]] | None:
+        triage = redteam_triage.c
+        found = connection.execute(
+            select(triage.finding_id, triage.record).where(
+                triage.space == space, triage.project_id == project_id, triage.id == entry_id
+            )
+        ).one_or_none()
+        return None if found is None else (found[0], found[1])
+
+    async def get_redteam_triage_entry(
+        self, principal: Principal, project_id: str, entry_id: str
+    ) -> tuple[str, dict[str, Any]] | None:
+        return await self._run(
+            principal, lambda connection, space: self._redteam_triage_entry(connection, space, project_id, entry_id)
+        )
+
+    @staticmethod
+    def _insert_redteam_review(connection: Connection, space: str, project_id: str, entry: RedteamTriageEntry) -> bool:
+        from sqlalchemy.dialects import postgresql, sqlite
+
+        postgres = connection.dialect.name == "postgresql"
+        dialect_insert: Any = postgresql.insert if postgres else sqlite.insert
+        statement = dialect_insert(redteam_triage).values(
+            space=space,
+            project_id=project_id,
+            finding_id=entry.finding_id,
+            id=entry.id,
+            created_at=entry.created_at,
+            record=entry.record,
+        )
+        insert_once = statement.on_conflict_do_nothing(index_elements=["space", "project_id", "id"])
+        if postgres:
+            return connection.execute(insert_once.returning(redteam_triage.c.id)).scalar_one_or_none() is not None
+        return connection.execute(insert_once).rowcount == 1
+
+    async def append_redteam_triage(
+        self, principal: Principal, project_id: str, finding_id: str, *, id: str, at: datetime, entry: dict[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
+        """Save a decision once and read back the winner of any concurrent retry."""
+
+        def work(connection: Connection, space: str) -> tuple[str, dict[str, Any]]:
+            self._insert_redteam_review(connection, space, project_id, RedteamTriageEntry(finding_id, id, at, entry))
+            saved = self._redteam_triage_entry(connection, space, project_id, id)
+            assert saved is not None
+            return saved
+
+        return await self._run(principal, work)
+
+    async def restore_redteam_triage(
+        self, principal: Principal, project_id: str, entries: Sequence[RedteamTriageEntry], *, dry_run: bool
+    ) -> tuple[int, int]:
+        """Add the whole batch, or roll it back when a review ID has different content."""
+
+        def work(connection: Connection, space: str) -> tuple[int, int]:
+            added = reused = 0
+            for entry in entries:
+                if not dry_run and self._insert_redteam_review(connection, space, project_id, entry):
+                    added += 1
+                    continue
+                prior = self._redteam_triage_entry(connection, space, project_id, entry.id)
+                if dry_run and prior is None:
+                    added += 1
+                    continue
+                if prior != (entry.finding_id, entry.record):
+                    raise StoreError("conflict", f"Triage review {entry.id} conflicts with a saved review")
+                reused += 1
+            return added, reused
 
         return await self._run(principal, work)
 

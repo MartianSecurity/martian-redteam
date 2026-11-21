@@ -16,6 +16,7 @@ Hosted features also need the SDK APIs enabled for the organisation.
    - [Shared eval data model](eval-model.md) — the objects the SDK, the local edition and the server have in common, and how each format maps onto them
    - [Evals core](evals-core.md) — the `/v1/evals` API that runs on its own, the three [editions](evals-core.md#editions-and-entitlements) (Community open source, Martian Cloud, On-Premises) and the feature keys each enforces, with the principal, entitlements, store, record store, worker and judge settings an edition injects, its read and write routes, suite audits, runs inspected for cheating, its OpenTelemetry traces endpoint, the worker interface, and the routes `martian evals push` sends local runs to
    - [Data export](data-export.md) — an organisation's data as JSON Lines files with a manifest, `martian evals export` resuming an interrupted export, and `martian evals import martian` loading it into a fresh install
+   - [Local MCP tools](sdk-and-ci.md#connect-an-mcp-client-to-local-reports) — read saved runs and remediation, validate suites and preview deterministic checks
    - [Trace store limits](trace-store-limits.md) — measured write and search latency and database growth of the in-process store's traces on Postgres, and the trace volume it holds
 4. [Agent Protocol](agent-protocol.md) — typed Backend operations and explicit legacy graph adapter
 5. [Orchestration](orchestration.md) — probe loop, encodings, callbacks, concurrency
@@ -26,6 +27,7 @@ Hosted features also need the SDK APIs enabled for the organisation.
    - [Red team attack methods](redteam-methods.md) — the method interface, kinds and arms, transform layers, and each method with what it tries and what it spends
    - [Red team targets](redteam-targets.md) — the function, HTTP and MCP server targets, how each keeps a conversation, the reply contract for tool calls, the recording MCP proxy and its local sessions, tool calls read from traces, and worked examples for four agent frameworks
    - [Red team reports](redteam-reports.md) — the report standard: what attacked, the budget, success per attempt and within k target queries with intervals, refusals, findings by evidence level, verification and controls, and every number defined; HTML, CSV, SARIF and JUnit outputs; two runs compared; confirmed findings pinned as regression tests
+   - [Local findings and remediation](redteam-findings.md) — review recurring findings, export reports and track follow-up scans from the workbench or CLI
    - [Red team benchmark results](redteam-benchmarks.md) — the open red team on InjecAgent with the report standard, and the script that reproduces it
    - [Red team API](redteam-api.md) — the `/v1/redteam` routes and their frozen contract
    - [Moving from promptfoo red team](redteam-from-promptfoo.md) — promptfoo's concepts in Martian's terms, what imports and what does not, and a walk-through of a sample project

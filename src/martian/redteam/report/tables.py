@@ -37,12 +37,12 @@ COLUMNS = [
     "output",
 ]
 
-_FORMULA = ("=", "+", "-", "@", "\t", "\r")
+_FORMULA = ("=", "+", "-", "@", "＝", "＋", "－", "＠")
 
 
-def _safe(value: object) -> str:
+def spreadsheet_cell(value: object) -> str:
     text = "" if value is None else str(value)
-    return "'" + text if text.startswith(_FORMULA) else text
+    return "'" + text if text.startswith(("\t", "\r", "\n")) or text.lstrip().startswith(_FORMULA) else text
 
 
 def _checks(attempt: Attempt) -> str:
@@ -59,7 +59,7 @@ def render_csv(run: RedteamRun) -> str:
         executed = any(result.executed for result in attempt.check_results if result.hit)
         spend = attempt.spend
         writer.writerow(
-            _safe(value)
+            spreadsheet_cell(value)
             for value in (
                 run.id,
                 attempt.id,

@@ -197,6 +197,8 @@ the negative control, each `not evaluated` when the probe has no benign task.
 ## Output formats
 
 Every version 2 run writes `redteam-run.json`, `redteam-report.json` and `redteam-report.md`.
+Finished runs also write `redteam-remediation.json` and `redteam-remediation.html` alongside
+those files. Stopped or partial scans can report their saved evidence and are marked incomplete.
 `martian redteam run FILE -f FORMAT` also writes the formats it names; `-f` can be repeated, takes
 names separated by commas, and `all` names every one. An unknown name stops the run before anything
 is called.
@@ -209,9 +211,29 @@ is called.
 | `junit` | `redteam-junit.xml` | One test suite per vulnerability and one test case per probe. A finding is a `failure` of type `confirmed` or `suspected`; a probe with an undetermined, stopped or errored attempt, or with no attempt, is an `error`, since none of these is a pass |
 
 `martian redteam report RUN` writes the reports of a saved run again: `RUN` is a `redteam-run.json`
-or the id of a run in the local store. It writes `redteam-report.json`, `redteam-report.md` and
-every format, or those `-f` names, to `-o` (default: the folder of the `redteam-run.json`, else
-`results`). `--run-file` gives the run file that SARIF results point at.
+or the id of a run in the local store. It writes `redteam-report.json`, `redteam-report.md`, the
+additional formats, and the remediation plan for a finished scan by default. Use `-f` to select
+formats and add `--remediation` to include the plan with that selection. `-o` sets the output
+folder. The default is the saved file's folder or `results` when using a run ID.
+`--run-file` gives the run file that SARIF results point at.
+
+For a prioritized plan from a saved scan, see [local remediation reports](redteam-findings.md#review-remediation-for-a-scan).
+
+### Download a scan PDF
+
+In the local workbench, open a finished run and choose **Download PDF**. The Remediation page
+offers the same download under **Export report**. The PDF records the scan ID, coverage,
+finding and attempt references, and prioritized defensive steps. It includes incomplete scans
+with a coverage notice. The PDF uses the findings as recorded in the scan, so later triage
+decisions leave it reproducible. Characters outside the PDF's standard typeface appear as
+Unicode escape sequences.
+
+With `martian-sdk[evals]`, you can generate the same `redteam-report.pdf` from a stored run ID
+or saved run file. Use `--project-id` when looking up an ID in another project.
+
+```bash
+martian redteam report redteam-run.json --pdf -o review
+```
 
 ## Comparing two runs
 
@@ -239,6 +261,9 @@ Each entry of `new`, `fixed`, `unchanged` and `undecided` names the `probe_id`, 
 
 Runs that are not comparable are still compared, with the warning at the top. A change in success
 between them may be the change of attacker or budget, not of the target.
+
+Use [remediation verification](redteam-findings.md#verify-a-remediation) to check whether a
+follow-up scan covered each finding before you update triage or make a release decision.
 
 ## Pinned findings
 

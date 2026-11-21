@@ -53,10 +53,21 @@ OPTIONS: dict[str, dict[str, Any]] = {
         "label": "Match case",
         "description": "Treat upper and lower case as different. Without it, case is ignored.",
     },
+    "case_mapping": {
+        "kind": "choice",
+        "label": "Case comparison",
+        "description": "Casefold by default. Choose lower for lowercase comparison, as in Promptfoo.",
+        "choices": ["casefold", "lower"],
+    },
     "min_similarity": {
         "kind": "number",
         "label": "Minimum similarity",
         "description": "From 0 to 1: 1 is the same text, 0.8 is two edits in ten characters.",
+    },
+    "max_edits": {
+        "kind": "integer",
+        "label": "Most edits",
+        "description": "Maximum Levenshtein distance in UTF-16 code units. Defaults to 5.",
     },
     "pattern": {"kind": "text", "label": "Regular expression", "description": "A Python regular expression."},
     "required_keys": {
@@ -64,11 +75,38 @@ OPTIONS: dict[str, dict[str, Any]] = {
         "label": "Required keys",
         "description": "Keys the JSON object must hold, one per line. Leave empty to accept any JSON.",
     },
+    "required_elements": {
+        "kind": "strings",
+        "label": "Required elements",
+        "description": "Dot-separated paths starting at the XML root, one per line.",
+        "placeholder": "catalog.book.1.title",
+    },
+    "fragment": {
+        "kind": "boolean",
+        "label": "Find XML in text",
+        "description": "Look for XML fragments inside a response. Leave off to grade a complete XML document.",
+    },
     "schema": {
         "kind": "json",
         "label": "JSON Schema",
         "description": "The JSON Schema the output must match, as JSON.",
         "placeholder": '{"type": "object", "required": ["answer"]}',
+    },
+    "plain_json": {
+        "kind": "boolean",
+        "label": "Require plain JSON",
+        "description": "Require a complete JSON document. The default also accepts one Markdown code fence.",
+    },
+    "embedded": {
+        "kind": "choice",
+        "label": "Find JSON in text",
+        "description": "Find JSON objects. The promptfoo option also accepts some repaired objects and flow YAML.",
+        "choices": ["strict", "promptfoo"],
+    },
+    "negate": {
+        "kind": "boolean",
+        "label": "Invert schema check",
+        "description": "Pass when no JSON value found by the check matches the schema.",
     },
     "min_length": {
         "kind": "integer",
@@ -79,6 +117,16 @@ OPTIONS: dict[str, dict[str, Any]] = {
         "kind": "integer",
         "label": "Most characters",
         "description": "The output has at most this many characters.",
+    },
+    "min_words": {
+        "kind": "integer",
+        "label": "Fewest words",
+        "description": "The output has at least this many words.",
+    },
+    "max_words": {
+        "kind": "integer",
+        "label": "Most words",
+        "description": "The output has at most this many words.",
     },
     "max_ms": {"kind": "number", "label": "Most milliseconds", "description": "The call took at most this long."},
     "max_usd": {"kind": "number", "label": "Most US dollars", "description": "The call cost at most this much."},
@@ -218,15 +266,18 @@ CHECKS: dict[str, tuple[str, str, tuple[str, ...]]] = {
         "The output is at least as similar as given to one of the values.",
         ("min_similarity",),
     ),
+    "levenshtein": ("Edit distance", "The output is within the maximum edit distance of a reference.", ()),
     "matches": ("Matches", "The regular expression is found anywhere in the output.", ("pattern",)),
     "not_matches": ("Does not match", "The regular expression is found nowhere in the output.", ("pattern",)),
     "is_json": ("Is JSON", "The output is valid JSON; with required keys, a JSON object holding each one.", ()),
+    "is_xml": ("Is XML", "The output is valid XML with the requested elements.", ()),
     "json_schema": ("Matches a JSON Schema", "The output is JSON that matches the JSON Schema.", ("schema",)),
     "length": (
         "Length",
         "The output has at least the fewest and at most the most characters; give either or both.",
         (),
     ),
+    "word_count": ("Word count", "The output has the fewest through the most words. Give either bound or both.", ()),
     "latency": (
         "Latency",
         "The target's call took at most this many milliseconds. A run's saved latency is read.",
@@ -282,6 +333,18 @@ CHECKS: dict[str, tuple[str, str, tuple[str, ...]]] = {
 
 # Words that name what the same option holds in a particular check.
 _RENAMED: dict[tuple[str, str], dict[str, Any]] = {
+    ("is_xml", "negate"): {
+        "label": "Invert XML check",
+        "description": "Pass when the output has no XML matching the required elements.",
+    },
+    ("levenshtein", "negate"): {
+        "label": "Invert edit-distance check",
+        "description": "Pass when the output is farther away from every reference.",
+    },
+    ("word_count", "negate"): {
+        "label": "Invert word-count check",
+        "description": "Pass when the word count is outside the given bounds.",
+    },
     ("no_prohibited_phrases", "values"): {
         "label": "Phrases",
         "description": "The phrases that must not appear, one per line.",

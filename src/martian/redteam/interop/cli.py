@@ -56,9 +56,16 @@ def import_promptfoo(
     data_dir: Annotated[
         Path | None, typer.Option("--data-dir", file_okay=False, show_default=False, help=DATA_DIR_HELP)
     ] = None,
+    provider: Annotated[
+        str | None, typer.Option("--provider", help="Import the exact provider display name from every file.")
+    ] = None,
+    target_key: Annotated[
+        str | None,
+        typer.Option("--target-key", help="Group one provider per file under a named target in local Findings."),
+    ] = None,
 ) -> None:
     """Import promptfoo red team results as red team runs in the local store: one run per provider.
-    Every hit is suspected: promptfoo's grader is a model that read the reply.
+    The recorded verdicts become suspected findings.
 
     martian redteam import promptfoo results.json
     """
@@ -66,14 +73,17 @@ def import_promptfoo(
     from martian.redteam.interop.promptfoo import PromptfooConversionError, import_results
 
     try:
-        runs = import_results(files, data_dir)
+        runs = import_results(files, data_dir, provider_name=provider, target_key=target_key)
     except PromptfooConversionError as error:
         _stop(f"Import failed: {safe_text(error)}")
     for run in runs:
         counts = run.counts
         source = run.provenance["promptfoo"]
+        source_provider = source["provider"]
+        name = source_provider.get("display_name") or source_provider["label"] or source_provider["id"]
+        linked = f", target {source['target_key']}" if "target_key" in source else ""
         console.print(
-            f"{Path(source['results']).name}: provider {source['provider']['label'] or source['provider']['id']}, "
+            f"{Path(source['results']).name}: provider {name}{linked}, "
             f"run {run.id}: {counts.attempts} attempts, {counts.hits} vulnerable, {counts.resisted} held, "
             f"{counts.errors} errors; {counts.suspected} suspected findings",
             markup=False,

@@ -31,7 +31,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from martian.evals.stats import rate_text, wilson
+from martian._stats import rate_text, wilson
 from martian.redteam.model import Attempt, EvidenceLevel, Probe, RedteamRun
 from martian.redteam.verify.rules import confirmed, counted_as, label
 

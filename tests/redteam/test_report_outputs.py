@@ -178,6 +178,11 @@ def test_martian_redteam_run_writes_the_formats_asked_for(tmp_path, models, monk
         "redteam.yaml"
     )
     assert "Mars Market" not in (folder / "redteam-report.html").read_text()
+    saved = json.loads((folder / "redteam-run.json").read_text())
+    plan = (folder / "redteam-remediation.json").read_text()
+    printable = (folder / "redteam-remediation.html").read_text()
+    assert json.loads(plan)["run_id"] == saved["id"]
+    assert "Executive summary" in printable and "Mars Market" not in plan + printable
 
 
 def test_an_unknown_format_stops_before_anything_runs(tmp_path, models):
@@ -202,5 +207,6 @@ def test_martian_redteam_report_writes_a_saved_runs_reports_again(tmp_path, mode
     Draft4Validator(SCHEMA).validate(json.loads((other / "redteam.sarif").read_text()))
     every = CliRunner().invoke(app, ["redteam", "report", str(saved)])
     assert every.exit_code == 0 and all((tmp_path / "results" / name).is_file() for name in FORMATS.values())
+    assert "redteam-remediation.html" in every.output
     missing = CliRunner().invoke(app, ["redteam", "report", "redteam-unknown"])
     assert missing.exit_code == 2

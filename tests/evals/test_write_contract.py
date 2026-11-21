@@ -67,7 +67,8 @@ WRITE_OPERATIONS = [
 # (tests/evals/test_bootstrap.py), and OpenTelemetry's POST /v1/traces is OTLP's, not the contract's
 # (tests/evals/test_otlp.py). CI gate sessions and tokens stay with the server's CI gate, and so do
 # the explorer's trace export and capabilities, which the Evals UI hides where the core serves it
-# (the bootstrap's `hostedRoutes`).
+# (the bootstrap's `hostedRoutes`). The Backend also serves a saved-suite launch route with its
+# registered agents and environments.
 OWN_NAMES = {("get", "/v1/evals/status"), ("get", "/v1/evals/bootstrap"), ("post", "/v1/traces")}
 # The core's own routes, which the server's contract does not have: a run's attempts
 # (MartianSecurity/martian-notes#180) and turns (MartianSecurity/martian-notes#191), the judges' agreement
@@ -153,6 +154,7 @@ NOT_SERVED = {
     ("post", "/v1/evals/ci/tokens"),
     ("delete", "/v1/evals/ci/tokens/{token_id}"),
     ("post", "/v1/evals/traces/export"),
+    ("post", "/v1/evals/suites/{suite_version_id}/runs"),
 }
 
 

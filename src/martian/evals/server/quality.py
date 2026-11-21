@@ -22,6 +22,7 @@ from dataclasses import asdict
 from statistics import mean
 from typing import Any
 
+from martian.evals._promptfoo_comparison import COMPARISON_BASIS
 from martian.evals.model import Run, Value, digest
 from martian.evals.server.projection import Assessment, ReviewRow, dataset_identity
 from martian.evals.server.schemas import EvalItemOut
@@ -153,7 +154,12 @@ def scorecard(
 
 
 def compare_runs(
-    baseline: Run, baseline_items: Sequence[EvalItemOut], candidate: Run, candidate_items: Sequence[EvalItemOut]
+    baseline: Run,
+    baseline_items: Sequence[EvalItemOut],
+    candidate: Run,
+    candidate_items: Sequence[EvalItemOut],
+    *,
+    verified_promptfoo: bool = False,
 ) -> dict[str, Any]:
     a = {i.dataset_item_id: i for i in baseline_items}
     b = {i.dataset_item_id: i for i in candidate_items}
@@ -161,9 +167,11 @@ def compare_runs(
     reason = ""
     if baseline.state != "completed" or candidate.state != "completed":
         reason = "Both runs must be completed."
-    elif left_dataset is None or left_dataset != right_dataset:
+    elif not verified_promptfoo and (left_dataset is None or left_dataset != right_dataset):
         reason = "Runs use different dataset identities; a paired comparison requires the same immutable dataset."
-    elif any((a[k].prompt, a[k].expected) != (b[k].prompt, b[k].expected) for k in a.keys() & b.keys()):
+    elif not verified_promptfoo and any(
+        (a[k].prompt, a[k].expected) != (b[k].prompt, b[k].expected) for k in a.keys() & b.keys()
+    ):
         reason = "Record inputs or expectations changed between runs."
     rows = []
     for key in sorted(a.keys() | b.keys(), key=lambda k: (a.get(k) or b[k]).position):
@@ -194,6 +202,7 @@ def compare_runs(
         )
     return {
         "compatible": not reason,
+        **({"comparison_basis": COMPARISON_BASIS} if verified_promptfoo and not reason else {}),
         "reason": reason,
         "baseline_id": baseline.id,
         "candidate_id": candidate.id,

@@ -37,6 +37,7 @@ evals = [
     "mlflow-skinny==3.18.0",
     "pandas>=2.2",
     "pytest>=8",
+    "reportlab>=5.1.0",
     "sqlalchemy>=2.0",
     "uvicorn>=0.30",
     "zstandard>=0.23",
@@ -115,6 +116,8 @@ dev = [
     "pytest-xdist>=3.8.0",
     "twine>=7.0.0",
     "opentelemetry-exporter-otlp-proto-http>=1.44.0",
+    "types-reportlab>=5.1.0.20261104",
+    "pypdf>=7.1.1",
 ]
 # The agent frameworks of the red team examples (examples/redteam/), pinned; not part of the package.
 examples = [

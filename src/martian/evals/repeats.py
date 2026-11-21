@@ -30,6 +30,7 @@ Over a case's attempts' own verdicts (each attempt passes when every check passe
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from statistics import mean
 from typing import Any, Literal
 
 from martian.evals.model import CombineRule
@@ -130,6 +131,14 @@ def reliability(cases: Sequence[tuple[str, Sequence[bool | None]]]) -> dict[str,
     }
 
 
+def combined_score(records: Sequence[Mapping[str, Any]]) -> dict[str, float | None]:
+    """Carry a numeric check's mean when all its grades are available."""
+    if not any("value" in record for record in records):
+        return {}
+    values = [record["value"] for record in records if record.get("value") is not None]
+    return {"value": mean(values) if len(values) == len(records) else None}
+
+
 def combine_attempts(attempts: Sequence[Mapping[str, Any]], rules: Mapping[str, CombineRule]) -> dict[str, Any]:
     """One case's verdict, check verdicts, reply and target error from its attempts' records
     (``passed``, ``checks``, ``output`` and ``error`` each). Each check's verdicts combine by its
@@ -137,13 +146,18 @@ def combine_attempts(attempts: Sequence[Mapping[str, Any]], rules: Mapping[str, 
     attempt."""
     checks: dict[str, dict[str, Any]] = {}
     for label, rule in rules.items():
-        verdicts = [attempt["checks"][label]["passed"] for attempt in attempts]
+        results = [attempt["checks"][label] for attempt in attempts]
+        verdicts = [result["passed"] for result in results]
         passed = combine(verdicts, rule)
         text = describe(verdicts, rule)
+        number = combined_score(results)
+        if number.get("value", 0) is None:
+            passed = None
         checks[label] = {
             "passed": passed,
             "rationale": text if passed is not None else None,
             "error": None if passed is not None else f"the attempts without a verdict leave it open: {text}",
+            **number,
         }
     values = [check["passed"] for check in checks.values()]
     verdict = None if any(value is None for value in values) else all(values)

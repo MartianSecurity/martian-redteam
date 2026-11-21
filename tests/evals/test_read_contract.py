@@ -77,8 +77,8 @@ def served(tmp_path):
     records.close()
 
 
-def test_the_copy_is_version_5_of_the_servers_contract():
-    assert CONTRACT["info"]["version"] == VERSION == "5"
+def test_the_copy_has_the_expected_contract_version():
+    assert CONTRACT["info"]["version"] == VERSION == "8"
     assert CONTRACT["info"]["title"] == "Martian Evals API"
 
 

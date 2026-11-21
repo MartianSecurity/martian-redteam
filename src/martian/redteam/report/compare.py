@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from martian.evals.stats import compare_outcomes
+from martian._stats import compare_outcomes
 from martian.redteam.model import Attempt, Finding, RedteamRun
 from martian.redteam.verify.rules import counted_as
 

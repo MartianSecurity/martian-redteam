@@ -59,6 +59,29 @@ its evidence. A re-judged run also returns `409`. Resume with the original execu
 The launcher and CLI hold one session per stored run until work ends. A new resume or a stop
 request from another process returns `409` while that session is active.
 
+### Local findings and remediation
+
+These routes are mounted by `martian ui` under `/v1/local/redteam`, outside the shared contract.
+All take `project_id`, default `default`.
+
+| Method and path | Response |
+| --- | --- |
+| `GET /findings` | Grouped findings, total matching count, project counts, filter choices and `export_formats`. Accepts `q`, `target`, `severity`, `status`, `category`, `vulnerability_type`, `evidence`, `run_id`, `seen_after_fix`, `sort` (`severity` or `recent`), `offset` and `limit` (1–200) |
+| `GET /findings/{finding_id}` | A finding, its scan observations and review history. Unknown ID or wrong project returns `404` |
+| `POST /findings/{finding_id}/triage` | Appends a record and returns `201`. Accepts a `comment`, `status` (`open`, `accepted`, `fixed`, `false_positive` or `ignored`) and/or `severity`. Omit severity to keep it or send `null` to restore scan severity. Requires `review`; an empty change returns `422` |
+| `GET /findings/export/{format}` | An attachment using the list filters across all pages. Takes `csv`, `sarif`, `colang-v1` or `colang-v2`. The Colang formats return `application/zip` with a manifest and the configuration for any mapped message policies |
+| `GET /runs/{run_id}/report.pdf` | A `redteam-report.pdf` attachment with recorded coverage, findings and remediation. An unknown run or wrong project returns `404`. A queued or running scan returns `409` |
+| `GET /runs/{run_id}/remediation` | The scan's executive summary, findings, evidence references, ranked actions and `prompt_controls` as JSON. Each suggested control contains `id`, `title`, `instruction` and the confirmed `finding_ids` supporting it |
+| `GET /runs/{run_id}/remediation/print` | The same plan as printable HTML |
+| `GET /runs/{run_id}/remediation/follow-ups` | Later finished scans with a matching recorded target, newest start first. Returns `items` with ID, purpose, state and timestamps, `has_more`, and an `unavailable_reason` for a baseline that cannot identify follow-ups. `limit` defaults to 20 and accepts 1–100 |
+| `GET /runs/{run_id}/remediation/verification` | Requires `candidate_run_id`. Compares saved scans of the same target. Returns `baseline_run`, `candidate_run`, per-finding verification in `findings`, `baseline_summary`, `candidate_summary`, `coverage`, and `follow_up_findings` with new findings and escalations |
+| `POST /runs/{run_id}/remediation/verified-fix` | Requires review access. The body takes `candidate_run_id`, the baseline scan's `finding_id`, and a UUID `request_id`. Returns the inventory finding ID and the evidence-linked triage note with status 201. Reuse the request ID to recover the same decision. Insufficient coverage, newer observations, or conflicting request IDs return 409 |
+
+The remediation routes return `404` for a missing scan and `409` while it is queued or
+running. Verification also returns `409` when the pair cannot establish a follow-up on the
+same recorded target. See [local findings and remediation](redteam-findings.md) for grouping, review and
+evidence semantics.
+
 ## Changing the contract
 
 `tests/redteam/test_api_contract.py` fails when a route drifts from the file. To change a route on purpose:

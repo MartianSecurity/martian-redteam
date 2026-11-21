@@ -30,7 +30,7 @@ import struct
 import uuid
 import zipfile
 import zlib
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -327,6 +327,7 @@ class ImportedRun:
 
     run: Run
     cases: list[ImportedCase]
+    artifacts: tuple[tuple[str, Callable[[], bytes]], ...] = ()
 
 
 def inspect_run(found: InspectLog, *, run_id: str, code: str) -> ImportedRun:
@@ -895,7 +896,7 @@ def record_imported_run(store: EvalStore, records: RecordStore, imported: Import
     )
     run = _wait(_start(store, records, started))
     try:
-        _wait(_cases(store, records, run, imported.cases))
+        _wait(_cases(store, records, run, imported))
     except BaseException as error:
         if isinstance(error, KeyboardInterrupt):
             _wait(_end(store, records, run.model_copy(update={"state": "cancelled"})))
@@ -924,11 +925,11 @@ async def _start(store: EvalStore, records: RecordStore, run: Run) -> Run:
     return await records.create_run(SINGLE_USER, run)
 
 
-async def _cases(store: EvalStore, records: RecordStore, run: Run, cases: list[ImportedCase]) -> None:
-    """Each case's trace, with its scores as assessments, then the case results and scores."""
+async def _cases(store: EvalStore, records: RecordStore, run: Run, imported: ImportedRun) -> None:
+    """Persist the cases, their traces and scores, and any run artifacts."""
     results: list[CaseResult] = []
     scores: list[Score] = []
-    for case in cases:
+    for case in imported.cases:
         saved = await store.record_trace(SINGLE_USER, case.trace)
         # By name and source: a code score and a judge's may share a name on one case.
         stored = {(score.scorer, score.source): score.store for score in saved.scores}
@@ -943,6 +944,8 @@ async def _cases(store: EvalStore, records: RecordStore, run: Run, cases: list[I
     await records.put_results(SINGLE_USER, DEFAULT_PROJECT, results)
     if scores:
         await records.put_scores(SINGLE_USER, DEFAULT_PROJECT, scores)
+    for name, read in imported.artifacts:
+        await store.put_artifact(SINGLE_USER, run.project_id, run.id, name, read())
 
 
 async def _end(store: EvalStore, records: RecordStore, run: Run) -> Run:

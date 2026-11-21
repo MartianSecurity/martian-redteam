@@ -21,8 +21,15 @@ LLM judges) your own model key.
 
 ```bash
 python -m pip install 'martian-sdk[evals]'
+martian evals validate evals.yaml
 martian evals run evals.yaml
 ```
+
+`martian evals validate` checks the YAML definition and its CSV or JSONL dataset without running
+the target or grading cases. It prints one JSON object with `valid`, `checks`, `cases`, `target`
+and `error`, and exits `2` when validation fails. Use `--config-only` to check the definition before
+the dataset is available. [MCP clients can also validate inline drafts and try checks on a supplied
+response](sdk-and-ci.md#connect-an-mcp-client-to-local-reports).
 
 ```yaml
 # evals.yaml
@@ -77,9 +84,10 @@ target:
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `url` | Yes | An `http` or `https` address. The runner sends one JSON `POST` per case, or per attempt with [repeats](#repeated-attempts) |
-| `body` | Yes | The JSON body, with placeholders in its string values |
+| `body` | Yes | The JSON object or array to send, with placeholders in its string values |
 | `headers` | No | Request headers |
 | `response_path` | No | Dotted path to the reply in a JSON response; a step of the digits 0-9 indexes a list, and a step of other digits, such as `²`, is refused when the suite loads. Without it, the response text is the reply |
+| `response_mode` | No | `json_or_text` uses a JSON response or selected value as text. It decodes JSON strings and writes arrays and objects as compact JSON. A non-JSON response falls back to raw text when no path is set. |
 | `timeout_seconds` | No | Per-request limit, 1 to 600; default 120. A function target takes it too (**Time limits and budgets** below) |
 
 - **Placeholders** are filled into `body` for each case: `{{input}}` is the case's `input`,
@@ -168,7 +176,8 @@ such as the output folder, is refused before any case. What each kind of target 
 [the target and the grader](security-and-data.md#the-target-and-the-grader).
 
 **Checks.** `rubric`, `guidelines` and `conditions` are the [LLM judges](#local-response-guideline-judge)
-graded by your criteria, `groundedness`, `context_relevance` and `context_sufficiency` the
+graded by your criteria. `scored_rubric` [records a numeric grade and a verdict](#scored-rubrics).
+`groundedness`, `context_relevance` and `context_sufficiency` are the
 [grounding judges](#grounding-and-retrieval-judges), which grade each case's documents in
 `inputs.context` and take no options, and `task_completion`, `policy_adherence` and
 `knowledge_retention` the [conversation judges](#conversation-judges), which read a whole
@@ -176,13 +185,14 @@ graded by your criteria, `groundedness`, `context_relevance` and `context_suffic
 beside the suite file ([custom Python checks](#custom-python-checks)); `installed` names a check
 that an edition's worker installs, which `martian evals run` cannot run
 ([installed checks](#installed-checks)); every other type is one of
-the twenty-eight [deterministic checks](#deterministic-checks), each with its options and an
+the [deterministic checks](#deterministic-checks), each with its options and an
 example, five of them the [policy checks](#policy-checks) for prohibited phrases, personal data,
 secrets, planted instructions and refusals, and four the
 [tool-call checks](#tool-calls-and-trajectories) of the tools an agent called, with what
 arguments, in which order and in how many steps. Criteria written in the suite file apply to every
-case that does not carry its own in `expectations`. Use at most one check of each judge type, and
-give repeated check types a `name`. A judge check can name a `panel` of judge models in place of
+case that does not carry its own in `expectations`. Give repeated check types a unique `name`.
+Use at most one check of each judge type except `scored_rubric`. The other judges can name a
+`panel` of judge models in place of
 `judge.model` ([a panel of judges](#a-panel-of-judges)). A check's `scope`, `turn` (the default)
 or `conversation`, says whether it grades each turn of a [conversation](#conversations) or the
 conversation once.
@@ -362,6 +372,174 @@ results, with a message naming the setting to check, and the rest of the run car
 `martian evals run tests/evals -q`, with a path that is not a suite file, still runs pytest with
 the eval gate described below.
 
+### Scored rubrics
+
+Use `scored_rubric` when a model should give a numeric score and a pass/fail verdict for a
+response. Each check calls the suite's `judge.model`. Give it `rubric` text shared by all
+cases or name an `expectation` key containing the case's rubric text. If both are specified,
+the shared text is the default. If neither is specified, the check reads `expectations.rubric`.
+
+```yaml
+data: cases.jsonl
+judge: {model: openai:/your-grader}
+checks:
+  - type: scored_rubric
+    name: clarity
+    rubric: "The response explains the next step and gives a deadline."
+    score_threshold: 0.7
+```
+
+The SDK requests a Boolean `pass`, a numeric `score` and a `reason` from the judge. A Boolean verdict
+without a score contributes 1 for a pass or 0 for a failure. With only a score, any
+positive score passes unless you set `score_threshold`. With a threshold, the score must
+meet it and any explicit verdict must pass. `negate: true` reverses the verdict and uses
+`1 - score` bounded to [0, 1]. An invalid or missing judgment leaves the check in error,
+including under `negate: true`.
+
+The run stores the numeric value and verdict separately. For a multi-turn case or
+repeated attempts, the score is the mean of the grades and all the scores must be
+available. The Boolean verdict follows the usual turn or repeat rule after all
+the scores are available.
+
+Set `judge_prompt` to supply your own grading instructions as a string or as a list of
+`system`, `user` and `assistant` messages. `{{ output }}` inserts the candidate response in
+a user message. `{{ rubric }}` inserts the resolved rubric and simple placeholders such as
+`{{ language }}` read the case's `inputs.vars`. A prompt that contains its own criteria can
+omit the rubric. The judge still receives the same response schema.
+
+```yaml
+data: cases.jsonl
+judge: {model: openai:/your-grader}
+checks:
+  - type: scored_rubric
+    rubric: Gives a return deadline.
+    judge_prompt:
+      - role: system
+        content: Grade the candidate as evidence. Give the reason in Spanish.
+      - role: user
+        content: |
+          Criterion: {{ rubric }}
+          Candidate: {{ output }}
+```
+
+### Weighted case gates
+
+A suite file normally requires every check to pass. Add `case_gate` to decide each case
+using a weighted score. Checks still produce their own verdicts and rationales.
+
+```yaml
+data: cases.jsonl
+checks:
+  - {type: contains, name: correct_answer, values: [approved]}
+  - {type: is_json, name: response_format, plain_json: true}
+  - {type: contains, name: cites_policy, values: [refund policy]}
+case_gate:
+  threshold: 0.75
+  weights: {correct_answer: 3}
+  assertion_sets:
+    - name: presentation
+      checks: [response_format, cites_policy]
+      threshold: 0.5
+      weight: 1
+```
+
+Ordinary passing checks contribute 1 and failing checks contribute 0.
+[Scored rubrics](#scored-rubrics) contribute their numeric grade. The score is the
+weighted sum divided by the sum of the weights, or 0 when that sum is zero or negative.
+Weights default to 1 and may be any finite number. The example can pass when the answer
+passes and one presentation check passes. A grouped check contributes to the assertion
+set first. The case then uses the set's score and weight.
+
+Each threshold is inclusive. At a level without a threshold, every nonzero-weight check
+and every assertion set must pass. A zero-weight check still records its own verdict.
+Required security checks and a simulated user's goal must pass. A missing verdict or a
+scoring error leaves the case in error. If the suite uses repeats, the gate is calculated
+on each attempt and on the verdicts after the configured per-check combine rules.
+
+The run stores `case_gate` in its provenance and records a `case_gate` score and
+decision for each case. Changes to scoring rules invalidate resumed verdicts and the corresponding
+baseline pairs. See [Promptfoo conversion](evals-core.md#converted-configs) for migrated gates.
+
+#### Case-specific checks
+
+Use `check_sets` in a local suite when different cases need different checks or
+thresholds. Declare the checks once, then assign every case ID to exactly one set.
+
+```yaml
+data: cases.jsonl
+checks:
+  - {type: contains, name: station_name, values: [Union Station]}
+  - {type: is_json, name: route_json}
+check_sets:
+  - cases: [station-label]
+    checks: [station_name]
+  - cases: [route-response]
+    checks: [station_name, route_json]
+    case_gate:
+      threshold: 0.75
+      weights: {route_json: 3}
+```
+
+A set uses its own `case_gate` when supplied and requires all its checks to pass otherwise.
+The local runner validates case assignments and required target calls before scoring. A data
+file can mix live cases and cases with stored outputs. Check sets apply to single-input cases
+running through `martian evals run`.
+
+#### Named metrics
+
+Use `case_gate.metrics` to give checks shared measurement names, keyed by check name. An assertion
+set can give its aggregate score a name with `metric`.
+
+```yaml
+case_gate:
+  threshold: 0.75
+  weights: {correct_answer: 3, cites_policy: 0}
+  metrics: {correct_answer: accuracy, cites_policy: citations}
+  assertion_sets:
+    - name: response
+      checks: [response_format, cites_policy]
+      metric: presentation
+      weight: 1
+```
+
+A zero weight contributes as one when measuring a named metric. Each child metric carries its
+weight through its assertion set, multiplied by the set's measurement weight. If a set and one
+of its checks use the same metric name, the set contributes its aggregate for that name.
+Metric names leave the gate's pass rules intact.
+
+`results.jsonl` records each measurement under `named_metrics` with its score and weight. When a
+case repeats, its run-level contribution comes from the combined check verdicts. The CLI and
+**Run → Overview → Named metrics** show the weighted mean, weight, and count of measured cases in
+the run. `summary.json` and run provenance also retain the weighted score total. A metric whose
+archive omits a weight shows its coverage with an unavailable mean.
+
+#### Derived metrics
+
+Add formulas to calculate composite scores over the weighted totals from named metrics.
+
+```yaml
+derived_metrics:
+  group_by: group
+  formulas:
+    - name: quality_per_case
+      value: "accuracy / __count"
+    - name: consistency
+      value: "accuracy > 0 ? citations / accuracy : 0"
+    - name: combined
+      value: "quality_per_case * 0.8 + consistency * 0.2"
+```
+
+Formulas can use earlier derived scores, named metric totals, numeric literals, parentheses,
+`+ - * /`, numeric comparisons, and `condition ? value : fallback`. The runner validates each
+expression before scoring. `__count` counts recorded cases, including cases that failed or
+returned an error. A repeated case contributes its combined result once. By default formulas
+use the whole run. With `group_by: group` they use each case's dataset group. Ungrouped cases
+contribute to an unnamed group.
+
+The CLI, `summary.json`, and **Run → Overview → Derived metrics** show the scores and case
+counts. A missing input or non-finite outcome is reported as unavailable with its reason.
+Case gates determine the case verdicts independently of these measurements.
+
 ### Push runs to a server
 
 `martian evals push` sends the local Evals UI's finished runs to a Martian server, each with its
@@ -462,8 +640,8 @@ not meet, has no `answer_format` reply.
 Each such check is listed with the reason, and every finding names the checks it was not graded
 by: the case may still fail one of them.
 
-- **LLM judges** (`rubric`, `guidelines`, `conditions`, `groundedness`, `context_relevance` and
-  `context_sufficiency`): grading a reply calls the judge's model. `--run-judges` asks them, at your
+- **LLM judges** such as `rubric`, `scored_rubric`, `guidelines`, `conditions`, `groundedness`,
+  `context_relevance` and `context_sufficiency` call a model to grade a reply. `--run-judges` asks them, at your
   provider's cost, about the replies every other check of the case passes, since any other reply
   fails the case anyway; `judge_calls` counts the calls. A judge asks for something, so one that
   passes a do-nothing or cheating reply is a weak check.
@@ -1246,7 +1424,8 @@ and a check named `goal_reached`.
 **The goal verdict.** `goal_reached` is a conversation-level result beside the checks' verdicts:
 passed when the simulator says the user reached its goal, failed when it says it did not, with
 its reason as the rationale, such as `With its budget of 4 messages spent, the simulated user did
-not reach its goal: ...`. The case passes when every check passes it and the goal was reached.
+not reach its goal: ...`. By default, the case passes when every check passes it and the
+goal was reached. A [weighted case gate](#weighted-case-gates) still requires a passing goal.
 With [repeats](#repeated-attempts) each attempt is a conversation of its own, and the goal's
 verdicts combine by the suite's `combine`. A model plays the user, so the same suite can talk
 differently from run to run; repeats show how much. The simulator grades its own conversation;
@@ -2189,19 +2368,22 @@ trace) says what it measured.
 
 | Type | Options | Passes when | Example |
 | --- | --- | --- | --- |
-| `contains` | `values` or `expectation`, `any_of`, `case_sensitive` | The output contains every value, or at least one with `any_of: true` | `{type: contains, values: [refund, order]}` |
+| `contains` | `values` or `expectation`, `any_of`, `case_sensitive`, `case_mapping` | The output contains every value, or at least one with `any_of: true` | `{type: contains, values: [refund, order]}` |
 | `contains_all` | `values` or `expectation`, `case_sensitive` | The output contains every value | `{type: contains_all, expectation: must_mention}` |
 | `contains_any` | `values` or `expectation`, `case_sensitive` | The output contains at least one value | `{type: contains_any, values: [sorry, cannot]}` |
-| `not_contains` | `values` or `expectation`, `case_sensitive` | The output contains none of the values. A refusal that quotes one still fails | `{type: not_contains, expectation: secret}` |
+| `not_contains` | `values` or `expectation`, `case_sensitive`, `case_mapping` | The output contains none of the values. A refusal that quotes one still fails | `{type: not_contains, expectation: secret}` |
 | `equals` | `values` or `expectation`, `case_sensitive` | The whole output is one of the values | `{type: equals, expectation: answer}` |
 | `starts_with` | `values` or `expectation`, `case_sensitive` | The output starts with one of the values | `{type: starts_with, values: ["I can't help with that"]}` |
 | `ends_with` | `values` or `expectation`, `case_sensitive` | The output ends with one of the values | `{type: ends_with, values: ["Is there anything else?"]}` |
 | `similarity` | `values` or `expectation`, `min_similarity`, `case_sensitive` | The output is at least `min_similarity` (0 to 1) similar to one of the values | `{type: similarity, expectation: reference, min_similarity: 0.8}` |
+| `levenshtein` | `values` or `expectation`, `max_edits`, `negate` | The output is within the edit limit of any reference. The default is 5 edits. | `{type: levenshtein, expectation: reference, max_edits: 1}` |
 | `matches` | `pattern` | The regular expression is found anywhere in the output | `{type: matches, pattern: 'ORD-\d{6}'}` |
 | `not_matches` | `pattern` | The regular expression is found nowhere in the output | `{type: not_matches, pattern: 'sk-[A-Za-z0-9]{8,}'}` |
-| `is_json` | `required_keys` | The output is valid JSON; with keys, a JSON object holding each one | `{type: is_json, required_keys: [answer]}` |
-| `json_schema` | `schema` | The output is JSON that matches the JSON Schema | `{type: json_schema, schema: {type: object, required: [answer]}}` |
+| `is_json` | `required_keys`, `plain_json` | The output is valid JSON. With keys, it is an object holding each one. | `{type: is_json, required_keys: [answer]}` |
+| `json_schema` | `schema`, `plain_json` or `embedded`, `negate` | JSON matches the schema. In embedded mode any matching object counts. With `negate: true`, no match passes. | `{type: json_schema, embedded: strict, schema: {type: object, required: [answer]}}` |
+| `is_xml` | `required_elements`, `fragment`, `negate` | A well-formed XML document contains the required element paths. With `fragment: true`, look for XML in a text reply. | `{type: is_xml, fragment: true, required_elements: [catalog.book.1.title]}` |
 | `length` | `min_length`, `max_length` | The output has at least `min_length` and at most `max_length` characters; give either or both | `{type: length, max_length: 800}` |
+| `word_count` | `min_words`, `max_words`, `negate` | The word count meets the inclusive bounds. Give either bound or both. | `{type: word_count, min_words: 3, max_words: 20}` |
 | `number_equals` | `value` or `expectation`, `path` or `pattern`, `abs_tolerance`, `rel_tolerance` | The number the output gives is the expected one, within the tolerance | `{type: number_equals, path: totals.net, expectation: net}` |
 | `sums_to` | `parts`, `total`, `abs_tolerance`, `rel_tolerance` | The numbers at the `parts` paths of the JSON output add up to the number at `total` | `{type: sums_to, parts: [lines.*.amount], total: subtotal}` |
 | `reconciles` | `add`, `subtract`, `total`, `abs_tolerance`, `rel_tolerance` | The numbers at the `add` paths, less those at `subtract`, come to the number at `total` | `{type: reconciles, add: [opening, deposits.*.amount], subtract: [withdrawals.*.amount], total: closing}` |
@@ -2217,6 +2399,19 @@ trace) says what it measured.
 | `tool_not_called` | `calls` or `expectation`, `arguments_match`, `source` | The agent made none of the calls | `{type: tool_not_called, calls: [close_account]}` |
 | `tool_trajectory` | `calls` or `expectation`, `order`, `arguments_match`, `source` | The agent's tool calls follow the steps, turn by turn, a list in a step being calls made together in one turn | `{type: tool_trajectory, calls: [lookup_order, [get_policy, check_eligibility]]}` |
 | `step_count` | `min_turns`, `max_turns`, `min_calls`, `max_calls`, `source` | The agent took that many model turns and made that many tool calls in all; give any of the bounds | `{type: step_count, max_turns: 5}` |
+
+`levenshtein` counts insertions, deletions, and substitutions in UTF-16 code units. Case and
+whitespace count as written. `word_count` counts runs of characters separated by JavaScript
+whitespace. Both checks accept `negate: true` to invert the verdict. They are also available as
+`levenshtein()` and `word_count()` from `martian.evals`.
+
+`embedded: strict` finds valid JSON objects in prose, fences, or arrays. `embedded: promptfoo`
+also tries the flow-YAML parsing and missing-brace repair used by Promptfoo and Marsfoo. An empty
+schema `{}` checks for any object. Objects inside a recognized object are checked through its
+schema, and arrays of scalars have no objects to check. Each candidate has a limit of 100,000
+UTF-16 code units. Scans that exceed the work limit and YAML data that exceeds the expansion limit
+produce check errors. Schema validation in compatibility mode requires JSON-shaped values within
+the supported numeric range.
 
 A check of this table can also be applied to the saved outputs of a run, without a suite file: a
 scoring request or a saved suite names it as `{type, name?, options}` with the options above
@@ -2251,7 +2446,8 @@ assert_checks(result)
 with `expectation: <key>`, which reads `expectations[<key>]` as one string or a list of strings;
 given both, a row's values join the fixed ones. The check's name must differ from that key. A
 missing or malformed value is a scorer error, so the gate fails closed. They ignore case unless
-`case_sensitive: true`.
+`case_sensitive: true`. `contains` and `not_contains` default to Unicode casefold and also
+accept `case_mapping: lower` for lowercase comparisons.
 
 **Whitespace.** `equals`, `starts_with`, `ends_with` and `similarity` ignore whitespace around the
 output and around each value, so a reply that ends in a newline still equals `"Paris"`. A value
@@ -2265,8 +2461,16 @@ answer two edits away, and 0 for texts with no character in place. The check com
 with each value and passes on the closest; when it passes, the reason gives that similarity and
 the number of edits.
 
+**XML.** `is_xml` accepts a complete XML document by default. Use `fragment: true` for XML
+within prose or a code fence. Required paths start at the document or fragment root. They use
+element names as written, including namespace prefixes, and zero-based indices on repeated
+siblings. For example, `catalog.book.1.title` names the second book's title. XML parsing stays
+offline and rejects declarations with a DTD internal subset. Python callers can use
+`is_xml(required_elements=["catalog.title"], fragment=True)`.
+
 **JSON Schema.** `json_schema` reads the output as `is_json` does (a dict or list, or JSON text
-with one optional Markdown fence) and names the first place that does not match, such as
+with one optional Markdown fence). Set `plain_json: true` on either check to require a complete
+JSON document in text replies. `json_schema` names the first place that does not match, such as
 `$.sources[0].url: does not match the pattern`. It checks a subset of JSON Schema 2020-12 with
 no extra dependency:
 

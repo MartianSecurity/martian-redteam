@@ -14,6 +14,7 @@ from martian.evals import (
     ends_with,
     equals,
     is_json,
+    is_xml,
     json_schema,
     latency,
     length,
@@ -26,6 +27,7 @@ from martian.evals import (
     starts_with,
     sums_to,
     table_equals,
+    word_count,
 )
 from martian.evals._numeric import read_text
 from martian.evals.checks import _edit_distance
@@ -50,6 +52,12 @@ def test_contains_requires_every_value_unless_any_of():
     assert value(contains("refund", "invoice"), "Your order has a refund.") is False
     assert value(contains("refund", "invoice", any_of=True), "Your order has a refund.") is True
     assert value(contains("Refund", case_sensitive=True), "a refund") is False
+
+
+def test_exact_word_count_reports_one_word_with_a_singular_reason():
+    check = word_count(min_words=1, max_words=1)
+    assert check(outputs="Library").rationale == "1 word"
+    assert check(outputs="Public library").value is False
 
 
 def test_not_contains_fails_a_refusal_that_quotes_the_secret():
@@ -207,6 +215,46 @@ def test_json_schema_reads_the_reply_as_is_json_does_and_names_the_first_problem
     assert feedback.value is (problem is None)
     if problem is not None:
         assert feedback.rationale.startswith(problem)
+
+
+def test_embedded_json_uses_strict_objects_or_promptfoo_repair():
+    schema = {"type": "object", "required": ["city"]}
+    strict = json_schema(schema, embedded="strict")
+    compatible = json_schema(schema, embedded="promptfoo")
+    assert value(strict, 'Map: {"note":"closed } gate"} {"city":"Paris"}') is True
+    assert value(strict, "Map: {city: 'Paris'") is False
+    assert value(compatible, "Map: {city: 'Paris'") is True
+    with pytest.raises(ValueError, match="use either plain_json or embedded"):
+        json_schema(schema, plain_json=True, embedded="strict")
+
+
+def test_xml_document_and_fragment_checks_follow_paths_from_each_root():
+    document = '<lib:catalog xmlns:lib="urn:library"><book/><book><title>Atlas</title></book></lib:catalog>'
+    required = ["lib:catalog.book.1.title"]
+    assert value(is_xml(required_elements=required), document) is True
+    assert value(is_xml(required_elements=["lib:catalog.book.title"]), document) is False
+    assert value(is_xml(), f"Read this {document} next.") is False
+    assert value(is_xml(fragment=True, required_elements=required), f"Read this {document} next.") is True
+    assert value(is_xml(fragment=True, required_elements=["book"]), f"Read this {document} next.") is False
+    assert (
+        value(
+            is_xml(fragment=True, required_elements=["hours.open", "location"]),
+            "Note <hours><open/></hours><location/>",
+        )
+        is True
+    )
+
+
+def test_xml_rejects_malformed_fragments_and_dtds_with_internal_subsets():
+    assert value(is_xml(fragment=True), 'Text <hours open="nine" open="ten"/>') is False
+    assert value(is_xml(fragment=True), "Text <!-- <hours/> -->") is False
+    assert value(is_xml(fragment=True), "Text <![CDATA[<hours/>]]>") is False
+    declaration = "<!DOCTYPE hours [<!ELEMENT hours EMPTY>]><hours/>"
+    assert value(is_xml(), declaration) is False
+    assert value(is_xml(fragment=True), f"Public schedule: {declaration}") is False
+    assert value(is_xml(negate=True), "<hours><close/></open>") is True
+    with pytest.raises(ValueError, match="must name XML elements"):
+        is_xml(required_elements=["hours..open"])
 
 
 def test_json_schema_combinators_and_json_equality():

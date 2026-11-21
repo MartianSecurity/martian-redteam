@@ -32,7 +32,7 @@ CASES = [
     {"id": "json", "inputs": {"message": "Reply in JSON", "lang": "en"}},
 ]
 
-# Every field the runner accepts, across two files: a URL target and a function target.
+# Every field the runner accepts, across a URL target, a function target, and a case-specific suite.
 EVERY_FIELD_URL = {
     "data": "cases.jsonl",
     "target": {
@@ -46,6 +46,7 @@ EVERY_FIELD_URL = {
             "system": "{{matrix.prompt}}",
         },
         "response_path": "choices.0.message.content",
+        "response_mode": "json_or_text",
         "timeout_seconds": 30.5,
     },
     "matrix": {
@@ -81,11 +82,12 @@ EVERY_FIELD_URL = {
             "combine": "any",
             "values": ["piano"],
             "expectation": "secret",
-            "case_sensitive": True,
+            "case_mapping": "lower",
         },
         {"type": "matches", "pattern": "^[A-Z]"},
         {"type": "not_matches", "name": "no_api_key", "scope": "conversation", "pattern": "sk-[A-Za-z0-9]{8,}"},
-        {"type": "is_json", "required_keys": ["answer", "lang"]},
+        {"type": "is_json", "required_keys": ["answer", "lang"], "plain_json": True},
+        {"type": "is_xml", "required_elements": ["catalog.book.1.title"], "fragment": True, "negate": True},
         {"type": "contains_any", "values": ["sorry", "cannot"], "case_sensitive": True},
         {"type": "contains_all", "name": "both_words", "expectation": "must_say"},
         {"type": "equals", "values": ["No."], "expectation": "answer", "case_sensitive": True},
@@ -94,6 +96,8 @@ EVERY_FIELD_URL = {
         {"type": "similarity", "expectation": "reference", "min_similarity": 0.8, "case_sensitive": True},
         {
             "type": "json_schema",
+            "negate": True,
+            "embedded": "strict",
             "schema": {
                 "type": "object",
                 "required": ["answer"],
@@ -143,6 +147,12 @@ EVERY_FIELD_URL = {
             "source": "reply",
         },
         {"type": "step_count", "min_turns": 1, "max_turns": 5, "min_calls": 0, "max_calls": 8, "source": "reply"},
+        {
+            "type": "scored_rubric",
+            "rubric": "State the refund amount.",
+            "judge_prompt": [{"role": "user", "content": "{{ rubric }}\nAnswer: {{ output }}"}],
+            "score_threshold": 0.75,
+        },
     ],
     "repeats": 3,
     "combine": "majority",
@@ -157,8 +167,19 @@ EVERY_FIELD_URL = {
 EVERY_FIELD_FUNCTION = {
     "data": "cases.jsonl",
     "target": {"file": "agent.py", "function": "answer"},
+    "case_gate": {
+        "threshold": 0.75,
+        "weights": {"contains": 2},
+        "metrics": {"contains": "Answer"},
+        "assertion_sets": [
+            {"name": "limits", "threshold": 0.5, "weight": 3, "metric": "Limits", "checks": ["contains", "cost"]}
+        ],
+    },
+    "derived_metrics": {"formulas": [{"name": "average", "value": "Answer / __count"}], "group_by": "group"},
     "checks": [
         {"type": "contains", "values": ["hello"]},
+        {"type": "levenshtein", "values": ["hello"], "max_edits": 0},
+        {"type": "word_count", "min_words": 1, "max_words": 3},
         {"type": "cost", "max_usd": 0.02, "max_tokens": 4000},
         {"type": "tool_trajectory", "name": "trajectory", "expectation": "expected_tool_calls", "source": "trace"},
         {
@@ -173,6 +194,19 @@ EVERY_FIELD_FUNCTION = {
         {"type": "installed", "name": "prepared_state", "options": {"at_least": 1, "names": ["a", "b"]}},
     ],
     "cache": {"functions": True},
+}
+EVERY_FIELD_CASE_CHECKS = {
+    "data": "cases.jsonl",
+    "target": EVERY_FIELD_FUNCTION["target"],
+    "checks": [{"type": "contains", "values": ["hello"]}, {"type": "cost", "max_usd": 0.02}],
+    "check_sets": [
+        {
+            "cases": ["safe", "json"],
+            "checks": ["contains", "cost"],
+            "aliases": {"contains": "sentence"},
+            "case_gate": EVERY_FIELD_FUNCTION["case_gate"],
+        }
+    ],
 }
 
 
@@ -207,11 +241,15 @@ def written_fields(value: typing.Any, prefix: str = "") -> set[str]:
                 "body",
                 "inference_params",
                 "conditions",
+                "judge_prompt",
                 "schema",
                 "rows",
                 "matrix",
                 "calls",
                 "options",
+                "weights",
+                "metrics",
+                "aliases",
             )
             if isinstance(nested, dict) and name not in opaque:
                 found |= written_fields(nested, f"{prefix}{name}.")
@@ -250,7 +288,9 @@ def test_every_check_type_the_file_accepts_is_one_the_runner_builds():
 
 
 def test_the_every_field_suites_set_every_field():
-    assert written_fields(EVERY_FIELD_URL) | written_fields(EVERY_FIELD_FUNCTION) == set(SUITE_FILE_FIELDS)
+    assert written_fields(EVERY_FIELD_URL) | written_fields(EVERY_FIELD_FUNCTION) | written_fields(
+        EVERY_FIELD_CASE_CHECKS
+    ) == set(SUITE_FILE_FIELDS)
 
 
 @pytest.mark.parametrize("path", EXAMPLE_SUITES, ids=lambda path: str(path.relative_to(REPOSITORY)))
@@ -268,10 +308,29 @@ def test_there_is_an_example_suite_to_round_trip():
     assert EXAMPLE_SUITES
 
 
-@pytest.mark.parametrize("suite", [EVERY_FIELD_URL, EVERY_FIELD_FUNCTION], ids=["url-target", "function-target"])
+@pytest.mark.parametrize(
+    "suite",
+    [EVERY_FIELD_URL, EVERY_FIELD_FUNCTION, EVERY_FIELD_CASE_CHECKS],
+    ids=["url-target", "function-target", "case-checks"],
+)
 def test_a_suite_with_every_field_set_round_trips_unchanged(suite, tmp_path):
     text = round_trip(write(tmp_path, suite))
     assert yaml.safe_load(text) == suite
+
+
+@pytest.mark.parametrize(
+    ("cases", "message"),
+    [
+        (["safe"], "case 'json' needs a check set"),
+        (["safe", "json", "absent"], "check_sets names an unknown case 'absent'"),
+        (["safe", "safe", "json"], "case 'safe' appears in more than one check set"),
+    ],
+)
+def test_case_check_sets_require_one_assignment_per_case(tmp_path, cases, message):
+    selected = {**EVERY_FIELD_CASE_CHECKS["check_sets"][0], "cases": cases}
+    suite = {**EVERY_FIELD_CASE_CHECKS, "check_sets": [selected]}
+    with pytest.raises(ConfigError, match=message):
+        load_suite_file(write(tmp_path, suite))
 
 
 def test_every_field_lands_where_the_map_says(tmp_path):
@@ -295,6 +354,7 @@ def test_every_field_lands_where_the_map_says(tmp_path):
             "system": "{{matrix.prompt}}",
         },
         response_path="choices.0.message.content",
+        response_mode="json_or_text",
     )
     # The matrix keeps the form it was written in: a list, and a mapping of names to values.
     assert suite.matrix == {

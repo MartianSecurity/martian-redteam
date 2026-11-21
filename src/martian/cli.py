@@ -52,6 +52,36 @@ def main(
         ctx.obj = MartianConfig
 
 
+@evals_app.command("validate")
+def validate_eval_suite(
+    path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, help="A native Evals suite YAML file.")],
+    config_only: Annotated[bool, typer.Option(help="Check the suite definition without loading the dataset.")] = False,
+) -> None:
+    """Check suite configuration and case data before running an evaluation."""
+    if importlib.util.find_spec("mlflow") is None:
+        typer.echo("Suite validation needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from martian._privacy import safe_text
+    from martian.config import ConfigError
+    from martian.evals.preview import SuiteValidation, validate_suite
+    from martian.evals.runner import load_suite
+
+    try:
+        suite, base = load_suite(path)
+        data = base / suite.data
+        case_data = None
+        if not config_only and data.suffix.lower() in (".jsonl", ".csv"):
+            case_data = data.read_text(encoding="utf-8-sig")
+        result = validate_suite(suite, case_data)
+    except ConfigError as error:
+        result = SuiteValidation(valid=False, error=safe_text(error)[:600])
+    except (OSError, UnicodeError):
+        result = SuiteValidation(valid=False, error="Could not read the suite or its dataset as UTF-8.")
+    typer.echo(result.model_dump_json())
+    if not result.valid:
+        raise typer.Exit(code=2)
+
+
 @evals_app.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def run_evals(
     ctx: typer.Context,
@@ -228,6 +258,7 @@ def _run_suite(
 ) -> None:
     from rich.console import Console
     from rich.table import Table
+    from rich.text import Text
 
     from martian.config import ConfigError
     from martian.evals.evaluate import EvaluationError
@@ -259,6 +290,10 @@ def _run_suite(
     groups = summary["groups"]
     plan = summary.get("repeats")
     notes = [f"Intervals allow for {groups} case {'group' if groups == 1 else 'groups'}"] if groups else []
+    if "case_gate" in summary:
+        notes.append("The weighted case gate decides the case. The report includes each component check verdict")
+    if "check_sets" in summary:
+        notes.append(f"{summary['check_sets']} check sets score their assigned cases")
     if plan:
         notes.append(
             "Counts are of cases. Each check combines its attempts by its own rule (check), all for a "
@@ -269,8 +304,7 @@ def _run_suite(
     if talks:
         notes.append(
             f"{talks['cases']} of the cases {'is a conversation' if talks['cases'] == 1 else 'are conversations'}: "
-            "each counts once, passing when each turn check passed every turn it grades and each conversation "
-            "check passed. Turns counts the conversations' turns"
+            "each counts once. Turns counts the conversations' turns"
         )
     simulated = summary.get("simulator")
     if simulated:
@@ -319,6 +353,18 @@ def _run_suite(
             row.append(f"{rule['combine']} ({rule['from']})")
         table.add_row(*row, style="bold" if counts is summary or counts is reliable else None)
     console.print(table)
+    if measurements := summary.get("named_metrics"):
+        metrics = Table("Metric", "Mean score", "Weight", "Cases", title="Named metrics")
+        for row in measurements:
+            score, weight = row["score"], row["weight"]
+            metrics.add_row(
+                Text(row["name"]),
+                "—" if score is None else f"{score:.6g}",
+                "—" if weight is None else f"{weight:.6g}",
+                str(row["cases"]),
+            )
+        console.print(metrics)
+    _print_derived(console, summary)
     if reliable:
         flaky = reliable["flaky"]
         shown = ", ".join(flaky[:5]) + (f" and {len(flaky) - 5} more" if len(flaky) > 5 else "")
@@ -355,7 +401,9 @@ def _run_suite(
         for line in _comparison_lines(comparison):
             console.print(line, markup=False, highlight=False, soft_wrap=True)
     elif baseline is not None:
-        console.print(_NO_RESULT.format(where=baseline, what="this suite"), markup=False, highlight=False)
+        console.print(
+            _NO_RESULT.format(where=baseline, what="this suite"), markup=False, highlight=False, soft_wrap=True
+        )
     files = "results.jsonl, summary.json, junit.xml, verdicts.json" + (", comparison.json" if comparison else "")
     console.print(f"Results: {summary['output']}/{files}")
     recorded = summary["run"]
@@ -377,6 +425,22 @@ def _run_suite(
 
 _NO_RESULT = "Compared with {where}: it holds no result of {what}, so it is gated on its own"
 _LABELS = {"better": "better", "worse": "worse, beyond noise", "within_noise": "within noise"}
+
+
+def _print_derived(console: Any, summary: dict[str, Any], *, combination: str | None = None) -> None:
+    if not (derived := summary.get("derived_metrics")):
+        return
+    from rich.table import Table
+    from rich.text import Text
+
+    grouped = any(item["group"] is not None for item in derived)
+    title = f"Derived metrics · {combination}" if combination else "Derived metrics"
+    table = Table("Metric", *(["Group"] if grouped else []), "Score", "Cases", title=Text(title))
+    for item in derived:
+        value = Text(item["error"] or "Unavailable") if item["score"] is None else f"{item['score']:.6g}"
+        group = [Text(item["group"] or "—")] if grouped else []
+        table.add_row(Text(item["name"]), *group, value, str(item["cases"]))
+    console.print(table)
 
 
 def _print_matrix(console: Any, path: Path, found: dict[str, Any], *, baseline: Path | None) -> int:
@@ -433,6 +497,7 @@ def _print_matrix(console: Any, path: Path, found: dict[str, Any], *, baseline: 
     for entry in combinations:
         summary, comparison = entry["summary"], entry["comparison"]
         lines = []
+        _print_derived(console, summary, combination=entry["id"])
         if flaky := (summary.get("reliability") or {}).get("flaky"):
             shown = ", ".join(flaky[:5]) + (f" and {len(flaky) - 5} more" if len(flaky) > 5 else "")
             lines.append(f"Flaky cases, whose verdict changed between attempts: {shown}")
@@ -747,8 +812,11 @@ def import_promptfoo(
     data_dir: Annotated[
         Path | None, typer.Option("--data-dir", file_okay=False, show_default=False, help=DATA_DIR_HELP)
     ] = None,
+    new_id: Annotated[
+        bool, typer.Option("--new-id", help="Record independent copies of previously imported runs.")
+    ] = False,
 ) -> None:
-    """Import promptfoo results as runs in the local Evals UI: one run per provider in each file.
+    """Import Promptfoo results, reusing completed runs from unchanged archives.
 
     martian evals import promptfoo results.json
     """
@@ -760,14 +828,16 @@ def import_promptfoo(
 
     home = data_folder(data_dir)
     try:
-        runs = import_promptfoo_results(files, home)
+        runs = import_promptfoo_results(files, home, new_id=new_id)
     except (PromptfooResultsError, LocalEditionError) as error:
         typer.echo(f"Import failed: {error}", err=True)
         raise typer.Exit(code=2) from None
     for run in runs:
         counts, source = run.counts, run.provenance["promptfoo"]
+        provider = source["provider"]
+        name = provider.get("display_name") or provider["label"] or provider["id"]
         typer.echo(
-            f"{Path(source['results']).name}: provider {source['provider']['label'] or source['provider']['id']}, "
+            f"{Path(source['results']).name}: provider {name}, "
             f"run {run.code}, {counts.cases} cases: {counts.passed} passed, {counts.failed} failed, "
             f"{counts.errors} errors"
         )
@@ -792,7 +862,7 @@ def convert_promptfoo(
             "--target",
             show_default=False,
             help="FILE.py[:FUNCTION], called as FUNCTION(prompt=..., vars=...) for each case (default function: "
-            "target). Without it, the suite grades each test's providerOutput.",
+            "target). Without it, conversion uses a supported provider or grades recorded replies.",
         ),
     ] = None,
     judge_model: Annotated[
@@ -804,6 +874,19 @@ def convert_promptfoo(
             "Without it, llm-rubric assertions are not converted.",
         ),
     ] = None,
+    provider: Annotated[
+        str | None,
+        typer.Option("--provider", help="Select one source provider by exact id or label before converting."),
+    ] = None,
+    all_providers: Annotated[
+        bool, typer.Option("--all-providers", help="Convert every declared provider with a native SDK mapping.")
+    ] = False,
+    strict: Annotated[
+        bool, typer.Option("--strict", help="Refuse known changes to scoring, case coverage, or execution.")
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show the conversion and diagnostics without writing files.")
+    ] = False,
 ) -> None:
     """Convert a promptfoo config into suite files for `martian evals run`, where its features map,
     and list everything that does not.
@@ -821,20 +904,32 @@ def convert_promptfoo(
     )
 
     try:
-        conversion = convert_promptfoo_config(config, output=output, target=target, judge_model=judge_model)
-        if conversion.suites:
+        conversion = convert_promptfoo_config(
+            config,
+            output=output,
+            target=target,
+            judge_model=judge_model,
+            provider=provider,
+            all_providers=all_providers,
+        )
+        if strict:
+            conversion.require_strict()
+        if conversion.suites and not dry_run:
             write_conversion(conversion, output)
     except PromptfooConfigError as error:
         typer.echo(f"Conversion failed: {error}", err=True)
         raise typer.Exit(code=2) from None
-    for line in report_lines(conversion, output):
+    for line in report_lines(conversion, output, preview=dry_run):
         typer.echo(line)
     if not conversion.suites:
         typer.echo("Nothing written: no test converts.", err=True)
         raise typer.Exit(code=2)
-    typer.echo(
-        f"Run each with `martian evals run`, such as: martian evals run {output / conversion.suites[0].suite_file}"
-    )
+    if dry_run:
+        typer.echo("Dry run only. The output directory has not been written.")
+    else:
+        typer.echo(
+            f"Run each with `martian evals run`, such as: martian evals run {output / conversion.suites[0].suite_file}"
+        )
 
 
 @import_app.command("mlflow")
@@ -1332,6 +1427,27 @@ def _print_fidelity(console: Console, report: dict[str, Any], source: dict[str, 
         soft_wrap=True,
     )
     console.print(table)
+
+
+@app.command("mcp")
+def run_mcp(
+    data_dir: Annotated[Path | None, typer.Option("--data-dir", file_okay=False, help=DATA_DIR_HELP)] = None,
+    project_id: Annotated[str, typer.Option(help="Project to expose through MCP.")] = "default",
+    preview_only: Annotated[
+        bool, typer.Option(help="Expose suite validation and check previews without a store.")
+    ] = False,
+) -> None:
+    """Read saved local reports and preview evaluation checks over MCP stdio."""
+    if any(importlib.util.find_spec(name) is None for name in ("mcp", "mlflow", "alembic", "fastapi", "sqlalchemy")):
+        typer.echo("The local MCP server needs martian-sdk[evals,mcp].", err=True)
+        raise typer.Exit(code=2)
+    from martian.local_mcp import LocalMCPError, serve_local_mcp
+
+    try:
+        serve_local_mcp(data_dir, project_id, preview_only=preview_only)
+    except LocalMCPError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from None
 
 
 @app.command("ui")

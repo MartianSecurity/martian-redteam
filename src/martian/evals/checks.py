@@ -27,17 +27,22 @@ import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal, NoReturn
 
 from mlflow.entities import Feedback
 from mlflow.genai.scorers import Scorer, scorer
 
-from martian.evals import _custom, _json_schema, _numeric, _policy, _tool_calls
+from martian.evals import _custom, _embedded_json, _json_schema, _numeric, _policy, _tool_calls, _xml_output
 from martian.evals.scorers import output_text
 
 
 def _values(
-    fixed: Sequence[str], expectation: str | None, expectations: dict[str, Any] | None, *, stripped: bool = False
+    fixed: Sequence[str],
+    expectation: str | None,
+    expectations: dict[str, Any] | None,
+    *,
+    stripped: bool = False,
+    allow_empty: bool = False,
 ) -> list[str]:
     found = list(fixed)
     if expectation is not None:
@@ -48,8 +53,9 @@ def _values(
             found.extend(given)
         else:
             raise ValueError(f"expectations.{expectation} must be a string or a list of strings")
-    if not found or not all(isinstance(value, str) and value for value in found):
-        raise ValueError("a check needs at least one nonempty string to look for")
+    if not found or not all(isinstance(value, str) and (allow_empty or value) for value in found):
+        kind = "string" if allow_empty else "nonempty string"
+        raise ValueError(f"a check needs at least one {kind} to look for")
     if stripped:
         # These checks ignore surrounding whitespace, so a blank value would match any output.
         found = [value.strip() for value in found]
@@ -102,8 +108,13 @@ def _scorer(name: str, expectation: str | None, decide: Callable[[str, dict[str,
     return check_row
 
 
-def _fold(text: str, case_sensitive: bool) -> str:
-    return text if case_sensitive else text.casefold()
+CaseMapping = Literal["casefold", "lower"]
+
+
+def _fold(text: str, case_sensitive: bool, case_mapping: CaseMapping = "casefold") -> str:
+    if case_sensitive:
+        return text
+    return text.lower() if case_mapping == "lower" else text.casefold()
 
 
 def _number(value: Any) -> bool:
@@ -126,14 +137,15 @@ def contains(
     name: str = "contains",
     any_of: bool = False,
     case_sensitive: bool = False,
+    case_mapping: CaseMapping = "casefold",
 ) -> Scorer:
     """Pass when the output contains every value (or, with ``any_of=True``, at least one)."""
     _configured(name, values, expectation)
 
     def decide(text: str, expectations: dict[str, Any] | None) -> Feedback:
         wanted = _values(values, expectation, expectations)
-        haystack = _fold(text, case_sensitive)
-        missing = [v for v in wanted if _fold(v, case_sensitive) not in haystack]
+        haystack = _fold(text, case_sensitive, case_mapping)
+        missing = [v for v in wanted if _fold(v, case_sensitive, case_mapping) not in haystack]
         passed = len(missing) < len(wanted) if any_of else not missing
         if not missing:
             rationale = "all values found"
@@ -165,14 +177,15 @@ def not_contains(
     expectation: str | None = None,
     name: str = "not_contains",
     case_sensitive: bool = False,
+    case_mapping: CaseMapping = "casefold",
 ) -> Scorer:
     """Pass when the output contains none of the values. A refusal that quotes one still fails."""
     _configured(name, values, expectation)
 
     def decide(text: str, expectations: dict[str, Any] | None) -> Feedback:
         forbidden = _values(values, expectation, expectations)
-        haystack = _fold(text, case_sensitive)
-        found = [v for v in forbidden if _fold(v, case_sensitive) in haystack]
+        haystack = _fold(text, case_sensitive, case_mapping)
+        found = [v for v in forbidden if _fold(v, case_sensitive, case_mapping) in haystack]
         return Feedback(
             value=not found,
             rationale="no forbidden value found"
@@ -228,8 +241,8 @@ def ends_with(
     return _whole_text(name, values, expectation, case_sensitive, str.endswith, "ends with")
 
 
-def _edit_distance(one: str, other: str, limit: int) -> int | None:
-    """The Levenshtein distance between two texts, or ``None`` when it is more than ``limit``.
+def _edit_distance(one: str | memoryview, other: str | memoryview, limit: int) -> int | None:
+    """The Levenshtein distance between two sequences, or ``None`` above ``limit``.
 
     Only the cells within ``limit`` of the diagonal can hold a distance that small, so only they
     are computed: the time grows with the length of the texts times the limit.
@@ -238,23 +251,31 @@ def _edit_distance(one: str, other: str, limit: int) -> int | None:
         one, other = other, one
     if len(one) - len(other) > limit:
         return None
+    if one == other:
+        return 0
     beyond = limit + 1
-    previous = [column if column <= limit else beyond for column in range(len(other) + 1)]
+    width = len(other)
+    previous = list(range(width + 1))
+    current = [beyond] * (width + 1)
     for row in range(1, len(one) + 1):
-        current = [beyond] * (len(other) + 1)
-        if row <= limit:
-            current[0] = row
+        start, end = max(1, row - limit), min(width, row + limit)
+        # Reset neighbors of this row's band before reusing the previous buffer.
+        current[start - 1] = row if start == 1 else beyond
+        if end < width:
+            current[end + 1] = beyond
+        best = current[start - 1]
         character = one[row - 1]
-        for column in range(max(1, row - limit), min(len(other), row + limit) + 1):
+        for column in range(start, end + 1):
             current[column] = min(
                 previous[column] + 1,
                 current[column - 1] + 1,
                 previous[column - 1] + (character != other[column - 1]),
                 beyond,
             )
-        if min(current) > limit:
+            best = min(best, current[column])
+        if best > limit:
             return None
-        previous = current
+        previous, current = current, previous
     return previous[-1] if previous[-1] <= limit else None
 
 
@@ -295,6 +316,43 @@ def similarity(
     return _scorer(name, expectation, decide)
 
 
+def _utf16(text: str) -> memoryview:
+    return memoryview(text.encode("utf-16-le", errors="surrogatepass")).cast("H")
+
+
+def levenshtein(
+    *values: str,
+    max_edits: int = 5,
+    expectation: str | None = None,
+    negate: bool = False,
+    name: str = "levenshtein",
+) -> Scorer:
+    """Pass when the text is at most ``max_edits`` from any reference, using UTF-16 code units.
+
+    Case and whitespace count as written. With ``negate=True``, pass when every reference is
+    farther away than ``max_edits``. An empty string is a valid reference.
+    """
+    _configured(name, values, expectation)
+    if values:
+        _values(values, None, None, allow_empty=True)
+    if type(max_edits) is not int or max_edits < 0:
+        raise ValueError("max_edits must be a whole number of 0 or more")
+
+    def decide(text: str, expectations: dict[str, Any] | None) -> Feedback:
+        reply = _utf16(text)
+        references = (_utf16(value) for value in _values(values, expectation, expectations, allow_empty=True))
+        match = any(
+            max(len(reply), len(other)) <= max_edits or _edit_distance(reply, other, max_edits) is not None
+            for other in references
+        )
+        reason = (
+            f"within {max_edits} edits of a reference" if match else f"more than {max_edits} edits from every reference"
+        )
+        return Feedback(value=match != negate, rationale=reason)
+
+    return _scorer(name, expectation, decide)
+
+
 def length(*, min_length: int | None = None, max_length: int | None = None, name: str = "length") -> Scorer:
     """Pass when the output has at least ``min_length`` and at most ``max_length`` characters.
 
@@ -319,6 +377,36 @@ def length(*, min_length: int | None = None, max_length: int | None = None, name
             value=not (short or long),
             rationale=f"{size} characters" if not (short or long) else f"{size} characters, {bound}",
         )
+
+    return _scorer(name, None, decide)
+
+
+# ECMAScript whitespace and line terminators, as used by Promptfoo's word-count assertion.
+_WORD = re.compile(r"[^ \t\r\n\v\f\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+")
+
+
+def word_count(
+    *, min_words: int | None = None, max_words: int | None = None, negate: bool = False, name: str = "word_count"
+) -> Scorer:
+    """Pass when the output's word count is within the inclusive bounds given.
+
+    Each run of non-whitespace counts as one word, including punctuation. Set ``negate=True``
+    to pass outside the bounds instead.
+    """
+    _named(name)
+    if min_words is None and max_words is None:
+        raise ValueError("a word_count check needs min_words, max_words or both")
+    for option, bound in (("min_words", min_words), ("max_words", max_words)):
+        if bound is not None and (type(bound) is not int or bound < 0):
+            raise ValueError(f"{option} must be a whole number of 0 or more")
+    if min_words is not None and max_words is not None and min_words > max_words:
+        raise ValueError("min_words is more than max_words")
+
+    def decide(text: str, expectations: dict[str, Any] | None) -> Feedback:
+        count = sum(1 for _ in _WORD.finditer(text))
+        in_range = (min_words is None or count >= min_words) and (max_words is None or count <= max_words)
+        words = "word" if count == 1 else "words"
+        return Feedback(value=in_range != negate, rationale=f"{count} {words}")
 
     return _scorer(name, None, decide)
 
@@ -357,27 +445,35 @@ def not_matches(pattern: str, *, name: str = "not_matches", flags: int = 0) -> S
     return _scorer(name, None, decide)
 
 
-def _parsed_json(outputs: Any, *, exact: bool = False) -> tuple[bool, Any]:
+def _reject_json_constant(_constant: str) -> NoReturn:
+    raise ValueError("non-finite constants are not JSON")
+
+
+def _parsed_json(outputs: Any, *, exact: bool = False, plain_json: bool = False) -> tuple[bool, Any]:
     """Whether the output is JSON, and its value. An output that is already a dict or list is
     JSON; one enclosing Markdown code fence around JSON text is accepted. ``exact`` reads JSON
     text's fractional numbers as ``Decimal``, as written."""
     if not isinstance(outputs, str):
         return True, outputs
-    text = outputs.strip()
-    fence, _, body = text.partition("\n")
-    if fence.strip().lower() in {"```", "```json"} and body.rstrip().endswith("```"):
-        text = body.rstrip()[:-3]
+    text = outputs
+    if not plain_json:
+        text = text.strip()
+        fence, _, body = text.partition("\n")
+        if fence.strip().lower() in {"```", "```json"} and body.rstrip().endswith("```"):
+            text = body.rstrip()[:-3]
     try:
-        return True, json.loads(text, parse_float=Decimal if exact else None)
-    except ValueError:
+        return True, json.loads(
+            text, parse_float=Decimal if exact else None, parse_constant=_reject_json_constant if plain_json else None
+        )
+    except (ValueError, RecursionError):
         return False, None
 
 
-def is_json(*, required_keys: Sequence[str] = (), name: str = "is_json") -> Scorer:
+def is_json(*, required_keys: Sequence[str] = (), name: str = "is_json", plain_json: bool = False) -> Scorer:
     """Pass when the output is valid JSON; with ``required_keys``, a JSON object holding each key.
 
     An output that is already a dict or list counts as JSON. One enclosing Markdown code fence
-    around JSON text is accepted, because many models add it.
+    around JSON text is accepted by default. Set ``plain_json=True`` to require a JSON document.
     """
     _named(name)
     keys = list(required_keys)
@@ -386,7 +482,7 @@ def is_json(*, required_keys: Sequence[str] = (), name: str = "is_json") -> Scor
 
     @scorer(name=name)
     def check(outputs: Any) -> Feedback:
-        parsed, value = _parsed_json(outputs)
+        parsed, value = _parsed_json(outputs, plain_json=plain_json)
         if not parsed:
             return Feedback(value=False, rationale="the output is not valid JSON")
         if not keys:
@@ -402,25 +498,69 @@ def is_json(*, required_keys: Sequence[str] = (), name: str = "is_json") -> Scor
     return check
 
 
-def json_schema(schema: Mapping[str, Any], *, name: str = "json_schema") -> Scorer:
+def is_xml(
+    *,
+    required_elements: Sequence[str] = (),
+    fragment: bool = False,
+    negate: bool = False,
+    name: str = "is_xml",
+) -> Scorer:
+    """Grade a complete XML document or, with ``fragment=True``, XML embedded in text.
+
+    Required paths start at the XML root. Use zero-based indices for repeated
+    siblings, as in ``catalog.book.1.title``. The check parses the supplied text
+    locally and does not resolve external resources.
+    """
+    _named(name)
+    required = _xml_output.paths(required_elements)
+
+    @scorer(name=name)
+    def check(outputs: Any) -> Feedback:
+        valid, reason = _xml_output.validate(outputs, required, fragment=fragment)
+        return Feedback(value=valid != negate, rationale=reason)
+
+    return check
+
+
+def json_schema(
+    schema: Mapping[str, Any],
+    *,
+    name: str = "json_schema",
+    plain_json: bool = False,
+    negate: bool = False,
+    embedded: _embedded_json.EmbeddedJson | None = None,
+) -> Scorer:
     """Pass when the output is JSON that matches ``schema``, a JSON Schema.
 
     The output is read as :func:`is_json` reads it. The schema may use the keywords
     :mod:`martian.evals._json_schema` lists, which cover the usual structure, type, length, range
     and pattern constraints and ``$ref`` into ``$defs``; any other keyword is refused here, when
     the check is created. ``format`` is not checked, as in the JSON Schema standard's default.
+    Set ``embedded="strict"`` to search the reply for JSON objects, or ``embedded="promptfoo"``
+    to also recognize the tolerant flow-YAML forms Promptfoo and Marsfoo accept. An empty schema
+    checks for the presence of any object. With ``negate=True``, pass when no value matches the schema.
     """
     _named(name)
+    if embedded not in (None, "strict", "promptfoo"):
+        raise ValueError("embedded must be strict or promptfoo")
+    if embedded is not None and plain_json:
+        raise ValueError("use either plain_json or embedded")
     _json_schema.check_schema(schema)
     pinned = copy.deepcopy(dict(schema))
 
     @scorer(name=name)
     def check(outputs: Any) -> Feedback:
-        parsed, value = _parsed_json(outputs)
+        if embedded is not None:
+            matches = _embedded_json.matches(outputs, pinned, embedded)
+            reason = "embedded object matches the schema" if matches else "no embedded object matches the schema"
+            return Feedback(value=matches != negate, rationale=reason)
+        parsed, value = _parsed_json(outputs, plain_json=plain_json)
         if not parsed:
-            return Feedback(value=False, rationale="the output is not valid JSON")
+            return Feedback(value=negate, rationale="the output is not valid JSON")
         found = _json_schema.problem(value, pinned)
-        return Feedback(value=found is None, rationale="the output matches the schema" if found is None else found)
+        return Feedback(
+            value=(found is None) != negate, rationale="the output matches the schema" if found is None else found
+        )
 
     return check
 
@@ -1017,9 +1157,11 @@ __all__ = [
     "ends_with",
     "equals",
     "is_json",
+    "is_xml",
     "json_schema",
     "latency",
     "length",
+    "levenshtein",
     "matches",
     "no_personal_data",
     "no_prohibited_phrases",
@@ -1039,4 +1181,5 @@ __all__ = [
     "tool_called",
     "tool_not_called",
     "tool_trajectory",
+    "word_count",
 ]

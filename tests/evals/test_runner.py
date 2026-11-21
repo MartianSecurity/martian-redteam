@@ -72,6 +72,25 @@ def write_jsonl(folder, cases=CASES):
     (folder / "cases.jsonl").write_text("\n".join(json.dumps(c) for c in cases) + "\n", encoding="utf-8")
 
 
+def test_validate_cli_checks_dataset_and_can_preview_definition_alone(tmp_path):
+    suite = tmp_path / "evals.yaml"
+    suite.write_text("data: cases.csv\nchecks:\n  - type: contains\n    values: [library]\n", encoding="utf-8")
+    dataset = tmp_path / "cases.csv"
+    dataset.write_text("id,input,output\nhours,When do you open?,The library opens at nine.\n", encoding="utf-8")
+    cli = CliRunner()
+    arguments = ["evals", "validate", str(suite)]
+
+    checked = cli.invoke(app, arguments)
+    assert checked.exit_code == 0 and json.loads(checked.stdout)["cases"] == 1
+    dataset.write_text("id,input\nhours,When do you open?\n", encoding="utf-8")
+    invalid = cli.invoke(app, arguments)
+    assert invalid.exit_code == 2 and "every case needs" in json.loads(invalid.stdout)["error"]
+    dataset.unlink()
+    config_only = cli.invoke(app, [*arguments, "--config-only"])
+    assert config_only.exit_code == 0 and json.loads(config_only.stdout)["cases"] is None
+    assert not (tmp_path / "evals-home").exists()
+
+
 def test_run_writes_results_summary_and_junit_without_any_platform_setting(tmp_path):
     write_jsonl(tmp_path)
     summary = run_suite(write_suite(tmp_path))
@@ -416,7 +435,7 @@ def agent_server():
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             seen.append({"path": self.path, "authorization": self.headers.get("Authorization"), "body": body})
-            payload = json.dumps(behaviour["reply"](body.get("message"))).encode()
+            payload = json.dumps(behaviour["reply"](body.get("message", body.get("messages")))).encode()
             self.send_response(behaviour["status"])
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -1064,12 +1083,19 @@ def test_reliability_counts_the_cases_that_passed_every_attempt_and_lists_the_fl
     assert calm.exit_code == 0 and "No flaky cases: no case's verdict changed between attempts" in calm.output
 
 
+def _assert_resume_progress(messages, summary, expected):
+    reason = summary["target_isolation"]["reason"]
+    warning = [f"{reason}: the target can read the suite file, its data and its results"] if reason else []
+    assert messages[: len(warning) + 1] == [*warning, expected]
+
+
 def test_repeats_and_rules_decide_whether_a_resumed_run_reuses_a_verdict(tmp_path):
     suite = flaky_suite(tmp_path, extra="combine: any\n")
     run_suite(suite)
     messages = []
-    assert run_suite(suite, progress=messages.append)["passed"] == 2
-    assert messages[0] == "2 cases of 5 attempts each, 2 already done"
+    resumed = run_suite(suite, progress=messages.append)
+    assert resumed["passed"] == 2
+    _assert_resume_progress(messages, resumed, "2 cases of 5 attempts each, 2 already done")
     # Another rule gives other verdicts from the same attempts, so the cases are graded again.
     flaky_suite(tmp_path, extra="combine: all\n")
     assert run_suite(suite, progress=messages.append)["invalidated"] == 2
@@ -1217,11 +1243,13 @@ checks:
   - {type: starts_with, values: ['{"answer"']}
   - {type: ends_with, values: ['"en"}']}
   - {type: similarity, expectation: near, min_similarity: 0.9}
+  - {type: levenshtein, expectation: near, max_edits: 2}
   - {type: matches, pattern: 'Par[a-z]+'}
   - {type: not_matches, pattern: 'sk-[A-Za-z0-9]{8,}'}
   - {type: is_json, required_keys: [answer]}
   - {type: json_schema, schema: {type: object, required: [answer], properties: {answer: {type: string}}}}
   - {type: length, min_length: 10, max_length: 200}
+  - {type: word_count, min_words: 5, max_words: 30}
   - {type: latency, max_ms: 60000}
   - {type: cost, max_usd: 0.01, max_tokens: 100}
   - {type: number_equals, path: total, value: 15.5}
@@ -1479,7 +1507,7 @@ def test_a_run_stops_at_its_time_limit_keeps_its_finished_cases_and_resumes(tmp_
     # Run again without the limit, it resumes after the case it finished.
     messages = []
     again = run_suite(suite, progress=messages.append)
-    assert messages[0] == "3 cases, 1 already done"
+    _assert_resume_progress(messages, again, "3 cases, 1 already done")
     assert (again["cases"], again["passed"], again["not_run"], again["stopped"]) == (3, 3, 0, None)
     assert calls_of(tmp_path) == ["question-0", "question-1", "question-2"]
     # A token limit needs a judge to count.
@@ -1498,6 +1526,115 @@ def rubric_reply(message):
         "choices": [{"index": 0, "message": {"role": "assistant", "content": json.dumps({"result": [verdict]})}}],
         "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
     }
+
+
+def test_scored_rubrics_keep_verdict_and_numeric_score_through_repeats(tmp_path, agent_server, monkeypatch):
+    detail_grades = iter(("0.875", "0.75"))
+
+    def judge(messages):
+        criteria, _, reply = messages[-1]["content"].partition("\n\nCandidate:\n")
+        if criteria.endswith("Gives enough detail"):
+            grade = (
+                {"pass": False, "score": next(detail_grades)} if reply == "Detailed" else {"pass": True, "score": 0.25}
+            )
+        elif reply == "Missing grade":
+            grade = {"reason": "No usable grade"}
+        else:
+            grade = {"score": 0.125}
+        data = rubric_reply(messages)
+        data["choices"][0]["message"]["content"] = json.dumps(grade)
+        return data
+
+    agent_server["behaviour"]["reply"] = judge
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-only")
+    monkeypatch.setenv("OPENAI_API_BASE", agent_server["url"].removesuffix("/chat") + "/v1")
+    write_jsonl(
+        tmp_path,
+        [
+            {"id": str(i), "input": "question", "output": reply}
+            for i, reply in enumerate(("Detailed", "Brief", "Missing grade"))
+        ],
+    )
+    suite = tmp_path / "evals.yaml"
+    suite.write_text(
+        """data: cases.jsonl
+judge: {model: "openai:/fixture"}
+checks:
+  - {type: scored_rubric, name: detail, rubric: Gives enough detail, score_threshold: 0.5}
+  - {type: scored_rubric, name: relevant, rubric: Contains irrelevant details, score_threshold: 0.5, negate: true}
+case_gate: {threshold: 0.75, weights: {detail: 2}}
+repeats: 2
+combine: any
+concurrency: 1
+""",
+        encoding="utf-8",
+    )
+    summary = run_suite(suite)
+    assert (summary["passed"], summary["failed"], summary["errors"]) == (1, 1, 1), summary
+    response_schema = agent_server["seen"][0]["body"]["response_format"]["json_schema"]["schema"]
+    assert set(response_schema["required"]) == {"reason", "pass", "score"}
+    rows = [json.loads(line) for line in (tmp_path / "results/results.jsonl").read_text().splitlines()]
+    assert [(row["passed"], row["checks"]["detail"]["passed"]) for row in rows] == [
+        (True, False),
+        (False, False),
+        (None, False),
+    ]
+    assert rows[0]["checks"]["detail"]["value"] == 0.8125
+    assert rows[0]["attempts"][0]["checks"]["relevant"]["value"] == 0.875
+    assert rows[0]["checks"]["case_gate"]["value"] == pytest.approx((2 * 0.8125 + 0.875) / 3)
+    assert "judge_invalid_schema" in rows[2]["attempts"][0]["checks"]["relevant"]["error"]
+    assert rows[2]["checks"]["case_gate"]["value"] is None
+    client = local_ui(tmp_path)
+    workbench = client.get(f"/v1/evals/{summary['run']['id']}/workbench").json()
+    assert any(a["name"] == "detail" and a["value"] == 0.8125 for a in workbench["assessments"])
+
+
+def test_a_custom_rubric_prompt_interpolates_case_data_as_chat_text(tmp_path, agent_server, monkeypatch):
+    def judge(messages):
+        response = rubric_reply(messages)
+        response["choices"][0]["message"]["content"] = json.dumps({"pass": True, "score": 0.75})
+        return response
+
+    agent_server["behaviour"]["reply"] = judge
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-only")
+    monkeypatch.setenv("OPENAI_API_BASE", agent_server["url"].removesuffix("/chat") + "/v1")
+    write_jsonl(
+        tmp_path,
+        [
+            {
+                "id": "custom-prompt",
+                "inputs": {"message": "Can I return this?", "vars": {"language": "es", "output": "not used"}},
+                "expectations": {"criterion": "Gives a receipt."},
+                "outputs": '{"answer": "Sí, {{ language }}.", "receipt": 274}',
+            },
+        ],
+    )
+    suite = tmp_path / "evals.yaml"
+    suite.write_text(
+        """data: cases.jsonl
+judge: {model: "openai:/fixture"}
+checks:
+  - type: scored_rubric
+    expectation: criterion
+    score_threshold: 0.75
+    judge_prompt:
+      - role: system
+        content: "Give a grade in {{ language }}."
+      - role: user
+        content: "Criterion: {{ rubric }}\\nAnswer: {{ output }}"
+""",
+        encoding="utf-8",
+    )
+    summary = run_suite(suite)
+    assert (summary["passed"], summary["failed"], summary["errors"]) == (1, 0, 0)
+    (request,) = [item["body"] for item in agent_server["seen"]]
+    assert request["messages"] == [
+        {"role": "system", "content": "Give a grade in es."},
+        {
+            "role": "user",
+            "content": 'Criterion: Gives a receipt.\nAnswer: {"answer":"Sí, {{ language }}.","receipt":274}',
+        },
+    ]
 
 
 def test_a_run_stops_at_its_judge_token_limit_and_resumes_with_a_higher_one(tmp_path, agent_server, monkeypatch):
@@ -1567,7 +1704,7 @@ def test_a_repeated_run_stopped_in_the_middle_of_a_cases_attempts_runs_them_all_
     monkeypatch.setattr(martian.evals.limits, "monotonic", real)
     messages = []
     again = run_suite(suite, progress=messages.append)
-    assert messages[0] == "3 cases of 3 attempts each, 1 already done"
+    _assert_resume_progress(messages, again, "3 cases of 3 attempts each, 1 already done")
     assert (again["cases"], again["passed"], again["not_run"], again["stopped"]) == (3, 3, 0, None)
     assert calls_of(tmp_path) == ["question-0"] * 3 + ["question-1"] * 4 + ["question-2"] * 3
     assert again["attempts"]["total"] == 9
