@@ -1,0 +1,1 @@
+function e(e){let t=String(e??``);return/^[\s\u0000-\u001f]*[=+\-@]/.test(t)||/^[\t\r\n]/.test(t)?`'`+t:t}export{e as t};

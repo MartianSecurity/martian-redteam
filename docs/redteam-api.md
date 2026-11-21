@@ -57,7 +57,8 @@ accounting is [unverifiable](redteam-run-file.md#budget) returns `409` and prese
 its evidence. A re-judged run also returns `409`. Resume with the original execution run ID.
 
 The launcher and CLI hold one session per stored run until work ends. A new resume or a stop
-request from another process returns `409` while that session is active.
+request from another process returns `409` while that session is active. Resume reports a
+completed checkpoint even while its session is closing.
 
 ### Local findings and remediation
 

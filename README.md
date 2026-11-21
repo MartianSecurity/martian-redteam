@@ -52,8 +52,8 @@ pull request with the last result of `main` and name the cases that went from pa
 
 ## What is in the package
 
-The local Findings and Remediation features, MCP tools, XML checks and strict migration options
-below require the preview SDK. Use the matching workbench build for the new Red Team screens.
+SDK 0.4.0 adds local Findings, Remediation Reports, read-only MCP tools, XML checks and strict
+Promptfoo and Marsfoo migration. The wheel includes the matching Evals and Red Team workbench.
 
 - `martian evals run`: a suite file run locally, as above.
 - `martian evals prompts push`: a suite file's matrix prompts kept as immutable versions in the
@@ -87,9 +87,9 @@ below require the preview SDK. Use the matching workbench build for the new Red 
   service. It runs evals against endpoints you define with your own key, and runs them again;
   see
   [the local edition](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-martian-ui).
-  The Red Team pages show saved scans, attempts, catalogue and coverage. With the matching
-  workbench build, review recurring findings and triage history, export a remediation report
-  and verify a fix using a saved follow-up with matching coverage.
+  The Red Team pages show saved scans, attempts, catalogue and coverage. Review recurring
+  findings and triage history, export a remediation report and verify a fix using a saved
+  follow-up with matching coverage.
   [Local findings and remediation](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/redteam-findings.md)
   The UI can start, stop and resume local scans and show application traces recorded with
   [MLflow tracing](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#traces-from-an-application).

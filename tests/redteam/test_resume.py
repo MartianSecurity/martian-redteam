@@ -37,21 +37,28 @@ def store(tmp_path):
 
 async def killed_half_way(store, file, *, after=3):
     """Run ``file`` until ``after`` attempts are kept, then kill it. Returns the kept run."""
-    target = CountingTarget("No.")
-    target.delay = 0.05
     kept = asyncio.Event()
+
+    class PausedTarget(CountingTarget):
+        async def send(self, message, *, session=None):
+            # Further pipeline attempts wait for cancellation even if scheduled before the test.
+            if len(self.calls) >= after:
+                await asyncio.Future()
+            return await super().send(message, session=session)
 
     async def checkpoint(run):
         await store.save(run)
-        if sum(1 for _ in run.attempts) >= after:
+        if run.state == "running" and len(run.attempts) == after:
             kept.set()
 
-    engine = Engine(file, service=StubService(), target=target, checkpoint=checkpoint, run_id="run-1")
+    engine = Engine(file, service=StubService(), target=PausedTarget("No."), checkpoint=checkpoint, run_id="run-1")
     task = asyncio.create_task(engine.run())
-    await kept.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        await asyncio.wait_for(kept.wait(), timeout=30)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
     earlier = await store.get("default", "run-1")
     assert earlier is not None and earlier.state == "cancelled"
     return earlier
@@ -61,7 +68,7 @@ async def test_a_killed_run_resumes_and_makes_no_model_call_for_finished_attempt
     file = run_file(**FILE)
     earlier = await killed_half_way(store, file)
     finished = [attempt for attempt in earlier.attempts if attempt.outcome == "resisted"]
-    assert 3 <= len(finished) < PLANNED
+    assert len(finished) == 3
     service, target = StubService(), CountingTarget("No.")
     resumed = await execute(file, service=service, target=target, store=store, resume=earlier)
     assert resumed.id == "run-1" and resumed.state == "completed" and len(resumed.attempts) == PLANNED

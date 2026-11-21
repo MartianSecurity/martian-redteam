@@ -397,6 +397,29 @@ async def test_a_running_checkpoint_can_only_be_recovered_with_the_local_session
         second.close()
 
 
+async def test_resume_reports_completion_while_the_run_session_closes(tmp_path):
+    store = RedteamStore.local(tmp_path)
+    try:
+        run = RedteamRun(
+            id="fixture-completed",
+            catalog_version="fixture",
+            state="completed",
+            provenance={"launch": {"run_file": {}}},
+        )
+        await store.save(run)
+        launcher = LocalLauncher(store.records)
+        with store.run_session(run.project_id, run.id):
+            with pytest.raises(HTTPException, match="this one is completed") as refused:
+                await launcher.resume(SINGLE_USER, run.project_id, run.id)
+            assert refused.value.status_code == 409
+        with pytest.raises(HTTPException, match="this one is completed") as settled:
+            await launcher.resume(SINGLE_USER, run.project_id, run.id)
+        assert settled.value.detail == refused.value.detail
+        assert await store.get(run.project_id, run.id) == run
+    finally:
+        store.close()
+
+
 def test_unverifiable_budget_fails_the_gate_and_ci_reports_even_with_a_decided_attempt():
     ledger = Ledger(Budget(cost_usd=0.01))
     ledger.reserve("judge", PROBE.id)
