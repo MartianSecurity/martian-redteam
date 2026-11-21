@@ -1226,7 +1226,7 @@ def target(message):
 
 REPLY = (
     '{"answer": "Paris", "lines": [{"ref": "a", "amount": 10.00}, {"ref": "b", "amount": 5.50}], '
-    '"total": 15.50, "lang": "en"}'
+    '"total": 15.50, "catalog": "<catalog><title>Atlas</title></catalog>", "lang": "en"}'
 )
 """
 
@@ -1247,6 +1247,7 @@ checks:
   - {type: matches, pattern: 'Par[a-z]+'}
   - {type: not_matches, pattern: 'sk-[A-Za-z0-9]{8,}'}
   - {type: is_json, required_keys: [answer]}
+  - {type: is_xml, fragment: true, required_elements: [catalog.title]}
   - {type: json_schema, schema: {type: object, required: [answer], properties: {answer: {type: string}}}}
   - {type: length, min_length: 10, max_length: 200}
   - {type: word_count, min_words: 5, max_words: 30}
@@ -1278,7 +1279,7 @@ def test_a_suite_file_runs_every_deterministic_check_with_no_model_call(tmp_path
     row = {"id": "capital", "input": "Capital of France? Reply in JSON."}
     reply = (
         '{"answer": "Paris", "lines": [{"ref": "a", "amount": 10.00}, {"ref": "b", "amount": 5.50}], '
-        '"total": 15.50, "lang": "en"}'
+        '"total": 15.50, "catalog": "<catalog><title>Atlas</title></catalog>", "lang": "en"}'
     )
     lines = [{"ref": "b", "amount": "5.5"}, {"ref": "a", "amount": 10}]
     row["expectations"] = {
