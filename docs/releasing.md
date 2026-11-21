@@ -200,10 +200,10 @@ CI's `packaging` job runs `sbom.py wheel` on every pull request. The policy has,
   component that declared another licence would fail.
 - **`concluded`**: a component whose metadata does not name an SPDX licence, with the licence read
   from its licence file. It applies only while the metadata declares the text it was reviewed
-  against, and the concluded licence must itself be allowed. Today: `gitdb`, `pyasn1-modules` and
-  `sqlparse` (metadata "BSD", no variant) and the image's CPython (no metadata).
+  against, and the concluded licence must itself be allowed. The policy records the BSD variants
+  for `gitdb`, `pyasn1-modules`, `reportlab` and `sqlparse`, and the PSF licence for the image's CPython.
 - **`exceptions`**: one component accepted under one licence outside the list, with the reason.
-  Today the only one is the Inter font, `@fontsource-variable/inter`, under OFL-1.1.
+  The policy records the Inter font under OFL-1.1 and Pillow under MIT-CMU.
 - **`not_checked`**: the Debian packages of the image's base image (`deb:*`). They are listed, but
   many are GPL or LGPL system programs and libraries that Debian distributes; they are not held to
   the allowed list.
