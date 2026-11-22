@@ -45,7 +45,7 @@ What the target sends:
 
 | Target | Conversation id | History |
 | --- | --- | --- |
-| Function | The `session_id` parameter, when the function takes one | The `history` parameter: earlier turns as `user` and `assistant` messages |
+| Function | The `session_id` parameter, when the function takes one | Not sent by `martian redteam run`, which calls the function as a version 0.2 callback; a suite file's function target gets the `history` parameter |
 | HTTP | `{{session_id}}` in `body`. `session.header` also sends it in a header | `{{history}}` is the earlier turns; `{{messages}}` is those and the new message. A body with only `{{input}}` sends the newest turn |
 | MCP | `session_argument`, and `reset_argument` is `true` on the first turn | Not sent: the server keeps it |
 

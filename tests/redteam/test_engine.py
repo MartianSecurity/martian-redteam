@@ -26,6 +26,7 @@ from martian.redteam.model import EvidenceLevel, ToolCall
 from martian.redteam.server import router
 from martian.redteam.store import RedteamStore
 from martian.redteam.targets.callback import CallbackTarget, function_target
+from martian.redteam.targets.conversations import conversation_id
 from martian_redteam.types import Turn as LegacyTurn
 from tests.redteam.engine_helpers import CountingTarget, StubService, run_file
 
@@ -263,6 +264,21 @@ async def test_a_function_file_is_a_target(tmp_path):
     target = function_target(tmp_path / "agent.py")
     assert target.kind == "function" and target.name == "agent.py:target"
     assert (await target.send("hi")).text == "echo hi"
+
+
+async def test_a_function_file_that_takes_session_id_is_given_the_conversations_id(tmp_path):
+    # The id it binds its tools with as the action id, so an environment's gateway or the recording
+    # proxy attributes its calls to the attempt (MartianSecurity/martian-notes#592).
+    (tmp_path / "agent.py").write_text(
+        "async def target(message, session_id=''):\n    return session_id\n"
+        "def plain(prompt, session_id):\n    return session_id\n"
+    )
+    attempt = "excessive_agency/functionality/prompt_injection#1"
+    assert (await function_target(tmp_path / "agent.py").send("hi", session=attempt)).text == conversation_id(attempt)
+    assert (await function_target(tmp_path / "agent.py").send("hi", session="attempt-1")).text == "attempt-1"
+    assert (await function_target(tmp_path / "agent.py", "plain").send("hi", session="attempt-1")).text == "attempt-1"
+    # A conversation the engine did not name has no id to give.
+    assert (await function_target(tmp_path / "agent.py").send("hi")).text == ""
 
 
 # --- martian redteam run ---------------------------------------------------------------------------
