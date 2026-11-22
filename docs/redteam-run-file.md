@@ -83,7 +83,7 @@ The target block is a suite file's target block (see [evals](evals.md)), plus `p
 | `mcp` | An MCP server as the target. See below |
 | `memory` | The target keeps a memory across conversations, for [memory poisoning](catalog.md#memory-poisoning). Without it, memory poisoning probes are skipped. See below |
 
-Each attack is one conversation. In `body`, `{{session_id}}` is the conversation's id, `{{history}}` its earlier turns and `{{messages}}` those turns and the new message. A body with `{{messages}}` or `{{history}}` resends the history each turn; a body with only `{{input}}` sends the newest turn. A function in `file` that takes `session_id` or `history` parameters is given them.
+Each attack is one conversation. In `body`, `{{session_id}}` is the conversation's id, `{{history}}` its earlier turns and `{{messages}}` those turns and the new message. A body with `{{messages}}` or `{{history}}` resends the history each turn; a body with only `{{input}}` sends the newest turn. A function in `file` is called as a version 0.2 callback, with the message (and `turns` when it takes that parameter); one that takes a `session_id` parameter is given the conversation's id, which it passes to `bind_tools` as the action id.
 
 `session` takes these fields:
 

@@ -7,19 +7,25 @@ their arguments and whether they ran when it has ``tool_calls``, else by name. S
 be resisted on it. :func:`function_target` loads the run file's ``file`` and ``function``.
 
 A callback keeps no conversation of its own: each ``send`` is one call, and ``session`` is passed back
-on the reply.
+on the reply. A callback that takes a ``session_id`` parameter is given the conversation's id
+(:func:`~martian.redteam.targets.conversations.conversation_id` of ``session``, empty without one),
+the id it binds its tools with as the action id, so the recording proxy or an environment's gateway
+attributes its calls to the attempt.
 """
 
 from __future__ import annotations
 
+import inspect
 import time
 from collections.abc import Callable
 from concurrent.futures import Executor
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from martian.redteam.model import ToolCall
 from martian.redteam.targets import TargetReply
+from martian.redteam.targets.conversations import conversation_id
 from martian_redteam.callback import TargetCallback, invoke_callback
 from martian_redteam.types import Turn
 
@@ -37,7 +43,12 @@ class CallbackTarget:
     ) -> None:
         self._kind = kind
         self.name = name or getattr(callback, "__name__", "callback")
+        self._callback, self._executor = callback, executor
         self._invoke = invoke_callback(callback, _executor=executor)
+        try:
+            self._takes_session = "session_id" in inspect.signature(callback).parameters
+        except (TypeError, ValueError):
+            self._takes_session = False
 
     @property
     def kind(self) -> str:
@@ -45,7 +56,11 @@ class CallbackTarget:
 
     async def send(self, message: str, *, session: str | None = None) -> TargetReply:
         started = time.perf_counter()
-        result: Any = await self._invoke(message, None)
+        invoke = self._invoke
+        if self._takes_session:
+            named = partial(self._callback, session_id=conversation_id(session) if session else "")
+            invoke = invoke_callback(named, _executor=self._executor)
+        result: Any = await invoke(message, None)
         latency = (time.perf_counter() - started) * 1000
         if isinstance(result, Turn):
             calls = [ToolCall.model_validate(call.model_dump()) for call in result.tool_calls] or [
