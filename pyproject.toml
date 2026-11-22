@@ -124,5 +124,5 @@ examples = [
     "claude-agent-sdk==0.2.183",
     "langgraph==1.2.22",
     "openai-agents==0.22.3",
-    "pydantic-ai-slim==2.67.0",
+    "pydantic-ai-slim==2.71.0",
 ]
