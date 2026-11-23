@@ -278,6 +278,14 @@ def _stop(message: str) -> NoReturn:
     raise typer.Exit(code=2)
 
 
+def _require_evals_core(what: str) -> None:
+    """Stop, before anything is written or called, when the engine cannot load: a base install."""
+    from martian.redteam.runfile import needs_evals_core
+
+    if reason := needs_evals_core(what):
+        _stop(reason)
+
+
 def _formats(values: list[str]) -> list[str]:
     from martian.redteam.report.outputs import parse_formats
 
@@ -308,6 +316,8 @@ def _run_version_2(
 ) -> None:
     """Run a version 2 file with the red team engine, write its reports, keep it and apply its gate."""
     from contextlib import AsyncExitStack
+
+    _require_evals_core("A version 2 run file")
 
     from martian.redteam.engine.budget import BudgetExhausted, Ledger, ResumeError
     from martian.redteam.engine.memory import StrategyLibraryError
@@ -697,9 +707,9 @@ def campaign_command(
         markup=False,
     )
     if found.redteam_run is not None:
-        from martian.redteam.engine.report import JSON_NAME, MARKDOWN_NAME, REPORT_NAME
         from martian.redteam.model import RedteamRun
         from martian.redteam.report import build_report, render_markdown
+        from martian.redteam.report.files import JSON_NAME, MARKDOWN_NAME, REPORT_NAME
 
         run = RedteamRun.model_validate(found.redteam_run)
         output.mkdir(parents=True, exist_ok=True)
@@ -892,6 +902,8 @@ def pin_run_command(
     """Re-run pinned findings against the run file's target, with no attacker or judge model."""
     from contextlib import AsyncExitStack
 
+    _require_evals_core("Re-running pins")
+
     from martian.redteam.engine.runs import SessionHandoverError, TargetUnavailable, build_target, tool_boundary
     from martian.redteam.pins import STATUS_WORDS, load, render_markdown, replay
     from martian.redteam.runfile import RunFile, problems
@@ -956,6 +968,8 @@ def _keep_locally(assessment: RiskAssessment) -> None:
 def _validate_version_2(config_path: Path) -> None:
     from martian.redteam.runfile import RunFile, problems
 
+    _require_evals_core("Validating a version 2 run file")
+
     found = problems(config_path)
     if found:
         console.print(f"[red]Validation failed:[/red] {len(found)} problem(s)")
@@ -988,6 +1002,8 @@ def rejudge_command(
 ) -> None:
     """Decide a stored version 2 run again with this run file's checks, without calling the target."""
     from contextlib import AsyncExitStack
+
+    _require_evals_core("Re-judging a run")
 
     from martian.redteam.engine.gate import gate_failures
     from martian.redteam.engine.plan import PlanError, plan
@@ -1075,6 +1091,7 @@ def selftest_command(
     ] = None,
 ) -> None:
     """Run each evidence level against a planted vulnerable target; exit 1 when one misses its hit."""
+    _require_evals_core("The self-test")
     from martian.redteam.verify.judge import ServiceJudge
     from martian.redteam.verify.selftest import ScriptedService, selftest
     from martian.redteam.verify.verifiers import Verifiers

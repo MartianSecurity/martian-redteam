@@ -36,6 +36,14 @@ def _needs_evals(what: str) -> None:
         _stop(f"{what} needs martian-sdk[evals].")
 
 
+def _needs_engine(what: str) -> None:
+    """Stop when a version 2 run file cannot be read here: a base install (:func:`needs_evals_core`)."""
+    from martian.redteam.runfile import needs_evals_core
+
+    if reason := needs_evals_core(what):
+        _stop(reason)
+
+
 def _ui_hint(data_dir: Path | None) -> str:
     from martian.evals.local import data_folder
 
@@ -130,6 +138,7 @@ def convert_promptfoo(
 
     martian redteam convert promptfoo promptfooconfig.yaml --output converted
     """
+    _needs_engine("Converting to a version 2 run file")
     from martian.redteam.interop.promptfoo import (
         PromptfooConversionError,
         convert_config,
@@ -221,6 +230,7 @@ def garak_command(
     import os
     import subprocess
 
+    _needs_engine("martian redteam garak")
     from martian.redteam.interop import garak
 
     if importlib.util.find_spec("garak") is None:
