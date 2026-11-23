@@ -89,6 +89,9 @@ class Exchange:
     """The payload after the method's layers: what the attempt keeps as its ``input``."""
     sent: str = ""
     """What the target received: ``message`` with what the probe plants and its benign task."""
+    world: Any = None
+    """In a Martian environment, the world's outcome of the exchange's conversation (a
+    :class:`~martian.redteam.world.WorldOutcome`): its state checks and the gateway's calls."""
 
 
 class AttackContext(Protocol):

@@ -596,7 +596,7 @@ class Engine:
             "attacker": self.attacker_name(member) if role == "attack" else attacker,
         }
 
-        if role == "attack" and self.world is None:
+        if role == "attack" and (self.world is None or not planned.attack_method.legacy):
             return await self._method_attempt(planned, number, fields, spending)
 
         def done(**update: Any) -> Attempt:
@@ -621,7 +621,8 @@ class Engine:
                 for layer in planned.attack_method.layers:
                     payload = layer(payload)
             elif role == "attack":
-                # In an environment, only the six version 0.2 methods run: one attack, written once.
+                # In an environment, a version 0.2 method writes one attack, once; every other method
+                # runs as without one (_method_attempt), each conversation in a world of its own.
                 payload, generated = await self._generate(planned, spending, attempt_id)
                 for layer in planned.attack_method.layers:
                     payload = layer(payload)
@@ -858,23 +859,38 @@ class Engine:
         await self._render(probe, attempt_id, reply.text)
         receipts = self._keep_receipts(attempt_id)
         observed += [item.id for item in self._keep_memory(attempt_id)]
+        world = self._keep_world(attempt_id, final.world, None, None)
         fields.update(
             output=reply.text,
             # A first conversation (a cross-session or memory probe) is a target call too.
             target_calls=sum(turn.role == "target" for turn in context.turns),
-            evidence_ids=[evidence.id, *observed, *(item.id for item in receipts), *context.delivery_ids],
+            evidence_ids=[
+                evidence.id,
+                *observed,
+                *(item.id for item in receipts),
+                *context.delivery_ids,
+                *(item.id for item in world),
+            ],
             turns=context.turns,
         )
-        kept = [evidence, *reply.evidence, *receipts]
+        kept = [evidence, *reply.evidence, *receipts, *world]
         if probe.task_checks:
             task = await self._verify(
                 planned, probe.task_checks, probe.task, final.sent, reply, spending, kept, attempt_id
             )
             fields.update(task_results=task.results, task_completed=completed(task.results))
         decided = final.verified or await self._verify(
-            planned, probe.checks, final.attack, final.sent, reply, spending, kept, attempt_id
+            planned, probe.checks, final.attack, final.sent, reply, spending, kept, attempt_id, final.world
         )
         results, failure, stop = decided.results, decided.failure, decided.stop
+        if final.world is not None and any(result.kind == "state" and result.hit for result in results):
+            results, control = await self._state_control(
+                attempt_id,
+                results,
+                spending,
+                "\n\n".join(part for part in [context.planted, probe.task or CONTROL_MESSAGE] if part),
+            )
+            fields["evidence_ids"] = [*fields["evidence_ids"], *control]
         outcome, level = attempt_outcome(results)
         if outcome != "hit" and isinstance(stop, BudgetExhausted):
             return done(outcome="stopped", stopped_by=stop.limit, check_results=results, level=EvidenceLevel.DELIVERED)
