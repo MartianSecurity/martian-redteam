@@ -267,3 +267,41 @@ async def test_a_reply_says_whether_the_target_reports_its_tool_calls():
         reply = await target.send("hello")
         await target.close()
     assert reply.tool_calls_observed is False
+
+
+async def test_a_run_files_function_is_given_its_conversation_and_may_return_the_reply_contract(tmp_path: Path):
+    """``martian redteam run`` calls a ``file`` target in process (martian-notes#725)."""
+    from martian.redteam.engine.runs import build_target
+
+    path = tmp_path / "agent.py"
+    path.write_text(
+        textwrap.dedent(
+            """
+            SEEN = []
+
+            async def target(message, session_id="", history=None):
+                SEEN.append((session_id, list(history)))
+                call = {"name": "lookup_order", "arguments": {"order": 7}, "executed": True}
+                return {"text": f"echo {message}", "tool_calls": [call]}
+
+            def wrong(message):
+                return {"reply": message}
+            """
+        ),
+        encoding="utf-8",
+    )
+    target = build_target(block(file=str(path), function="target"))
+    first = await conversation(target, ["a", "b"], session="attempt-1")
+    other = await target.send("c", session="attempt-2")
+    seen = target._callback.__globals__["SEEN"]  # type: ignore[attr-defined]
+    assert seen == [
+        ("attempt-1", []),
+        ("attempt-1", [{"role": "user", "content": "a"}, {"role": "assistant", "content": "echo a"}]),
+        ("attempt-2", []),
+    ]
+    assert [reply.session for reply in [*first, other]] == ["attempt-1", "attempt-1", "attempt-2"]
+    [call] = first[0].tool_calls
+    assert (call.name, call.arguments, call.executed) == ("lookup_order", {"order": 7}, True)
+    assert first[0].tool_calls_observed and first[0].text == "echo a"
+    with pytest.raises(TypeError, match="tool_calls"):
+        await build_target(block(file=str(path), function="wrong")).send("a", session="attempt-3")

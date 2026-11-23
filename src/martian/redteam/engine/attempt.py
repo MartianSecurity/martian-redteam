@@ -28,6 +28,7 @@ from martian.redteam.engine.refusal import classify
 from martian.redteam.methods.base import AttackMethod, Exchange, Feedback, GenerationMode, Rung
 from martian.redteam.model import Check, CheckResult, Evidence, ToolCall, Turn
 from martian.redteam.targets.conversations import conversation_id
+from martian.redteam.targets.reply import with_observed
 from martian.redteam.verify.canary import context_of
 
 if TYPE_CHECKING:
@@ -81,6 +82,8 @@ class AttemptRun:
         self.values: dict[str, Any] = {}
         self._conversations = 0
         self._last_session: str | None = None
+        self._worlds: set[str] = set()
+        """In an environment, the conversations whose world has been prepared."""
         self._hidden = secret_values(policy=engine.service.redaction_policy)
         self._strategies = engine.strategies_for(planned, attempt_id)
         self.used: list[tuple[str, int]] = []
@@ -170,6 +173,10 @@ class AttemptRun:
         # What the probe plants (a canary note) and its benign task go with every message, as with
         # any attempt, by the probe's protocol: one conversation, or a first one before it.
         self.last_message, self.last_attack = message, attack
+        if self.engine.world is not None and session not in self._worlds:
+            # In an environment each conversation runs in a world reset for it.
+            await self.engine._prepare(session)
+            self._worlds.add(session)
         try:
             delivered = await self.engine._deliver(self.probe, session, message, self.spending)
         except BaseException:
@@ -177,6 +184,10 @@ class AttemptRun:
                 self.engine.deliverer.release(prepared)
             raise
         reply, sent = delivered.reply, delivered.sent
+        seen = await self.engine._outcome(session)
+        if seen is not None:
+            # The environment's gateway saw every call the agent made to its tools in this conversation.
+            reply = with_observed(reply, seen.tool_calls, seen.evidence)
         self.planted = delivered.planted
         self.last_message = sent
         self.turns += delivered.setup
@@ -188,6 +199,7 @@ class AttemptRun:
             session=session,
             attack=attack,
             sent=sent,
+            world=seen,
         )
         self.exchanges.append(exchange)
         if prepared is not None:
@@ -213,6 +225,7 @@ class AttemptRun:
                 self.spending,
                 kept,
                 self.attempt_id,
+                exchange.world,
             )
             feedback = self._graded(exchange, decided, found.results, refused)
         elif checks and all(check.kind == "judge" for check in checks):
@@ -225,6 +238,7 @@ class AttemptRun:
                 self.spending,
                 kept,
                 self.attempt_id,
+                exchange.world,
             )
             exchange.verified = verified
             results, failure, stop = verified.results, verified.failure, verified.stop

@@ -771,10 +771,23 @@ class RunFile(_Model):
                 resolve(attack)
             except MethodError as error:
                 raise ValueError(f"attacks[{index}]: {error}") from None
-            if self.environment is not None and not resolve(attack).legacy:
+            method = resolve(attack)
+            if self.environment is not None and not (
+                method.legacy or (not method.needs_attacker and method.delivery is None)
+            ):
                 raise ValueError(
                     f"attacks[{index}]: in an environment run only the six version 0.2 attack methods run "
-                    "(PromptInjection, Roleplay, PromptProbing, ROT13, Base64, Leetspeak), with no layers or route"
+                    "(PromptInjection, Roleplay, PromptProbing, ROT13, Base64, Leetspeak), with no layers or route, "
+                    "and the methods that call no model (Templates, Mutation), with no route"
+                )
+            if (
+                self.environment is not None
+                and not method.legacy
+                and any(vulnerability.plant is not None for vulnerability in self.vulnerabilities)
+            ):
+                raise ValueError(
+                    f"attacks[{index}]: plant puts an attack the attacker writes in the world; in an environment "
+                    "run with plant, use one of the six version 0.2 attack methods"
                 )
             route = attack.delivery
             if route is not None and route.route == "tool_result":
