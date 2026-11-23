@@ -9,7 +9,7 @@ async def close() -> None
 
 `TargetReply` holds the reply's `text`, the `tool_calls` the target made or asked for, `tool_calls_observed` (whether the target reports its tool calls at all, so that an empty list means none were made), the `session` the message was sent in, `latency_ms`, and the `evidence` a boundary the harness trusts captured about the calls: the [recording proxy](#recording-proxy)'s ledger or a [trace](#tool-calls-from-traces)'s tool spans, each with its source.
 
-`target_from_run_file(block)` builds the target a [run file](redteam-run-file.md)'s `target` block names: a `FunctionTarget`, an `HttpTarget` or an `McpServerTarget`. `martian redteam run` and the local edition's run routes build the `url` and `mcp` targets with it; they run a `file` target in process with the version 0.2 callback adapter (`targets/callback.py`), and put the target behind the [recording proxy](#recording-proxy) when the run file lists `tools.proxy`. Building one reads `${NAME}` from the environment and checks the settings; it calls nothing. The first message connects.
+`target_from_run_file(block)` builds the target a [run file](redteam-run-file.md)'s `target` block names: a `FunctionTarget`, an `HttpTarget` or an `McpServerTarget`. `martian redteam run` and the local edition's run routes build the `url` and `mcp` targets with it; they run a `file` target in process with the version 0.2 callback adapter (`targets/callback.py`), which keeps each session's conversation and takes the [reply contract](#reply-contract)'s object as well as text or a `Turn`, and put the target behind the [recording proxy](#recording-proxy) when the run file lists `tools.proxy`. Building one reads `${NAME}` from the environment and checks the settings; it calls nothing. The first message connects.
 
 ## Function and HTTP targets
 
@@ -45,7 +45,7 @@ What the target sends:
 
 | Target | Conversation id | History |
 | --- | --- | --- |
-| Function | The `session_id` parameter, when the function takes one | Not sent by `martian redteam run`, which calls the function as a version 0.2 callback; a suite file's function target gets the `history` parameter |
+| Function | The `session_id` parameter, when the function takes one | The `history` parameter, when the function takes one: the earlier turns as `user` and `assistant` messages, under `martian redteam run` and in a suite file |
 | HTTP | `{{session_id}}` in `body`. `session.header` also sends it in a header | `{{history}}` is the earlier turns; `{{messages}}` is those and the new message. A body with only `{{input}}` sends the newest turn |
 | MCP | `session_argument`, and `reset_argument` is `true` on the first turn | Not sent: the server keeps it |
 
@@ -56,7 +56,7 @@ A server that issues its own ids sets `session.response_path`. The first turn of
 A target reports the tool calls it made or asked for, so a check can ask whether the agent called `issue_refund` with an amount above a limit, and whether the call ran:
 
 - an HTTP target: the list at `tool_calls_path` in its JSON answer. An answer with nothing at the path made no calls;
-- a function: an object `{"text": "...", "tool_calls": [...]}` with no other keys;
+- a function, under `martian redteam run` or in a suite file: an object `{"text": "...", "tool_calls": [...]}` with no other keys;
 - a version 0.2 callback: a `Turn` with `tool_calls`, or its names-only `tools_called`.
 
 Each tool call is an object, or a tool's name as text (which says nothing about arguments or whether it ran):

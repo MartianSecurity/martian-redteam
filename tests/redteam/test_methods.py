@@ -210,9 +210,14 @@ def test_an_attack_that_names_nothing_known_is_a_problem_of_the_run_file(tmp_pat
         )
 
 
-def test_an_environment_run_takes_only_the_six_version_0_2_methods():
+def test_an_environment_run_takes_the_six_version_0_2_methods_and_those_that_call_no_model():
     with pytest.raises(ValueError, match="only the six version 0.2 attack methods"):
         run_file(attacks=[{"name": "Refine"}], environment="refund-desk")
     with pytest.raises(ValueError, match="only the six version 0.2 attack methods"):
         run_file(attacks=[{"name": "PromptInjection", "layers": ["Hex"]}], environment="refund-desk")
+    routed = {"name": "Templates", "delivery": {"route": "variable", "template": "Note: {{payload}}"}}
+    with pytest.raises(ValueError, match="the methods that call no model \\(Templates, Mutation\\), with no route"):
+        run_file(attacks=[routed], environment="refund-desk")
     assert run_file(attacks=[{"name": "ROT13"}], environment="refund-desk").environment == "refund-desk"
+    for attack in ({"name": "Templates"}, {"name": "Mutation"}, {"name": "Templates", "layers": ["Hex"]}):
+        assert run_file(attacks=[attack], environment="refund-desk").environment == "refund-desk"
