@@ -10,13 +10,14 @@ A callback may also return the reply contract's object, ``{"text": ..., "tool_ca
 other key (:func:`~martian.redteam.targets.reply.reply_from`), as a suite file's function target does:
 its calls are read with their arguments and whether they ran.
 
-Each ``send`` is one call. The target keeps each session's conversation
+Each ``send`` is one call. The target keeps each named session's conversation
 (:class:`~martian.redteam.targets.conversations.Conversations`), as the other targets do, and names it
 on the reply. A callback that takes a ``session_id`` parameter is given the conversation's id
 (:func:`~martian.redteam.targets.conversations.conversation_id` of the session), the id it binds its
 tools with as the action id, so the recording proxy or an environment's gateway attributes its calls
 to the attempt. One that takes ``history`` is given the conversation's earlier turns, as ``user`` and
-``assistant`` messages.
+``assistant`` messages. A ``send`` without a session is a call of its own, as in version 0.2: no id
+(``session_id`` is empty), no history, no session on the reply, and nothing kept.
 """
 
 from __future__ import annotations
@@ -64,26 +65,35 @@ class CallbackTarget:
         return self._kind
 
     async def send(self, message: str, *, session: str | None = None) -> TargetReply:
+        if session is None:
+            return await self._call(message, session=None, conversation_id="", history=[])
         async with self._conversations.turn(session) as conversation:
-            invoke = self._invoke
-            if self._takes:
-                given = {SESSION_ID: conversation.id, HISTORY: list(conversation.history)}
-                named = partial(self._callback, **{name: given[name] for name in self._takes})
-                invoke = invoke_callback(named, _executor=self._executor)
-            started = time.perf_counter()
-            result: Any = await invoke(message, None)
-            latency = (time.perf_counter() - started) * 1000
-            if not (
-                isinstance(result, str | Turn)
-                or (isinstance(result, Mapping) and isinstance(result.get("text"), str) and set(result) <= REPLY_KEYS)
-            ):
-                raise TypeError(
-                    'target callback must return str, Turn or {"text": ..., "tool_calls": [...]}, '
-                    f"got {type(result).__name__}"
-                )
-            reply = reply_from(result, session=conversation.session, latency_ms=latency)
+            reply = await self._call(
+                message, session=conversation.session, conversation_id=conversation.id, history=conversation.history
+            )
             conversation.answered(message, reply.text)
             return reply
+
+    async def _call(
+        self, message: str, *, session: str | None, conversation_id: str, history: list[dict[str, str]]
+    ) -> TargetReply:
+        invoke = self._invoke
+        if self._takes:
+            given = {SESSION_ID: conversation_id, HISTORY: list(history)}
+            named = partial(self._callback, **{name: given[name] for name in self._takes})
+            invoke = invoke_callback(named, _executor=self._executor)
+        started = time.perf_counter()
+        result: Any = await invoke(message, None)
+        latency = (time.perf_counter() - started) * 1000
+        if not (
+            isinstance(result, str | Turn)
+            or (isinstance(result, Mapping) and isinstance(result.get("text"), str) and set(result) <= REPLY_KEYS)
+        ):
+            raise TypeError(
+                'target callback must return str, Turn or {"text": ..., "tool_calls": [...]}, '
+                f"got {type(result).__name__}"
+            )
+        return reply_from(result, session=session, latency_ms=latency)
 
     def end(self, session: str) -> None:
         """Forget ``session``'s conversation. Sending with it again starts a new one."""
