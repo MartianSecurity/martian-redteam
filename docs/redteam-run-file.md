@@ -11,6 +11,8 @@ Both refuse fields they do not know.
 
 `martian redteam run FILE` runs a version 2 file with the red team engine ([how a run works](#how-a-run-works)). It runs a `file` and `function` target, a `url` target and an `mcp` target ([red team targets](redteam-targets.md)), and puts the target behind the recording proxy when the file lists `tools.proxy`. A file that names an `environment` needs a connection to a Martian server ([environments](#environments)).
 
+Version 2 files need `martian-sdk[evals]`, whatever generates the attacks: the target is the suite file's, and local models are called through the evals core's model routing. On a base install, `run`, `validate`, `rejudge`, `pin run`, `garak`, `convert promptfoo` and `selftest` stop with exit code 2 and the install command `python -m pip install 'martian-sdk[evals]'`. They stop before they write a file or call a server.
+
 ```yaml
 version: 2
 target:

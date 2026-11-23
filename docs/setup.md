@@ -3,8 +3,10 @@
 Use Python 3.12+. Install the published package with
 `python -m pip install 'martian-sdk[evals]'`, pinning an exact version in CI. A
 source checkout can use `uv sync --locked --extra evals`. The base installation
-supports standalone redteam, while the `evals` extra adds pytest/MLflow and
-persisted CI.
+runs version 0.2 red team run files on the Martian platform, campaigns, and the
+reports of a saved `redteam-run.json`. The `evals` extra adds pytest/MLflow,
+persisted CI, the local store and version 2 red team run files, whose engine is
+built on the evals core ([run file](redteam-run-file.md)).
 
 Configure one approved **Backend origin** and one organisation API token.
 Create a key under the console's API Keys settings with the needed evals/CI

@@ -952,6 +952,27 @@ def problems(path: str | Path) -> list[str]:
     return []
 
 
+_OWN_PACKAGES = frozenset({"martian", "martian_redteam", "martian_evals_kit"})
+
+
+def needs_evals_core(what: str) -> str | None:
+    """Why ``what`` cannot run here, or ``None``. A version 2 run file and the engine that runs it are
+    built on the evals core: the target is the suite file's (:class:`martian.evals.runner.TargetRef`),
+    and the local attacker and judge call models through MLflow's provider adapters. A base install,
+    without the ``evals`` extra, has neither. Any module outside this package that is missing while
+    the engine loads is the extra's; a missing module of this package is a bug and is raised."""
+    from importlib import import_module
+
+    try:
+        import_module("martian.redteam.engine")
+    except ModuleNotFoundError as error:
+        missing = (error.name or "").partition(".")[0]
+        if not missing or missing in _OWN_PACKAGES:
+            raise
+        return f"{what} needs martian-sdk[evals]: python -m pip install 'martian-sdk[evals]' ({missing} is missing)."
+    return None
+
+
 __all__ = [
     "VERSION",
     "AttackSpec",

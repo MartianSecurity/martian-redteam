@@ -16,7 +16,9 @@ Replace `<version>` with a release listed on PyPI.
 `evals` includes MLflow-skinny **3.18.0** and pytest. The SDK never connects to
 the hosted MLflow server, so this pin is independent of the server's version,
 which MartianSecurity/martian-evals sets. The base installation supports redteam
-callbacks and local reports. The SDK reaches MLflow internals only through
+callbacks and local reports. Version 2 red team run files need the `evals` extra:
+their targets and local models go through the evals core
+([run file](redteam-run-file.md)). The SDK reaches MLflow internals only through
 `src/martian/evals/_mlflow.py`, which lists each one. The exception is the process
 a function target runs in, which never imports the evals package and imports the
 two its tracing needs itself; `_mlflow.py` lists those too. Before moving the pin, run
